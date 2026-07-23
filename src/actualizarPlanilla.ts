@@ -498,6 +498,14 @@ export async function actualizarPlanilla(
     const fila = hoja.getRow(filaActual);
     const concepto = mov.textoParaMatchCliente;
 
+    // Copiar el estilo (borde, fuente, alineación) de la fila ancla — así las filas
+    // nuevas se ven igual que el resto del ledger, no en blanco/sin borde. Se copia
+    // ANTES de asignar los numFmt de abajo, que sí queremos que queden como los
+    // definimos explícitamente (fecha / moneda) y no lo que tuviera la fila ancla.
+    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
+      fila.getCell(col).style = hoja.getCell(filaAncla, col).style;
+    }
+
     fila.getCell(COL.FECHA).value = mov.fecha;
     fila.getCell(COL.FECHA).numFmt = "mm-dd-yy";
     fila.getCell(COL.CONCEPTO).value = concepto;
