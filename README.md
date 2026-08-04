@@ -43,7 +43,14 @@ for (const m of movimientos) {
 }
 ```
 
-Cada `movimiento` trae el campo **`textoParaMatchCliente`** — es el texto que le pasarías a Hermes/DeepSeek junto con tu listado de clientes para que sugiera a quién corresponde. En BROU es la columna "Asunto" (o la descripción si el asunto viene vacío); en Santander, como no hay columna de asunto separada, es la propia descripción.
+Cada `movimiento` trae el campo **`textoParaMatchCliente`** — es el texto que le pasarías a Hermes/DeepSeek junto con tu listado de clientes para que sugiera a quién corresponde, y es también lo que se escribe en la columna CONCEPTO de la planilla.
+
+- **BROU**: la columna "Asunto"; si viene vacía, la Descripción.
+- **Santander**: la Descripción (no hay columna de asunto separada); si la descripción no aporta nada (**3 caracteres o menos** — cubre `-`, `--`, vacío, sólo espacios), cae al **Tipo de Movimiento**, y como último recurso a la Referencia.
+
+El fallback de Santander no es un invento: mirando el histórico de la planilla, cuando el banco no mandaba descripción administración cargaba a mano exactamente el tipo de movimiento (una fila cargada como `DEPOSITO CHEQUES  CLEARING` coincide carácter por carácter con esa columna, doble espacio incluido). En los 4 estados de cuenta de ejemplo, el fallback se activa en 2 de 85 movimientos — ambos `-` de un "DEPOSITO CHEQUES  CLEARING". El campo `descripcion` mantiene siempre el texto crudo del banco, sin tocar.
+
+⚠️ **Riesgo conocido del umbral de 3 caracteres:** en la planilla hay muchísimos conceptos legítimos de 3 letras cargados a mano — `DUA` (171 veces), `BSE` (89), `UTE` (78), `SMI` (74), `OSE` (48), `BPS`, `DGI`, `IMM`, etc. Esos son textos que escriben las personas, no descripciones del banco, así que hoy no hay conflicto: en los archivos de ejemplo el banco siempre manda descripciones largas o `-`. Pero si algún día el banco mandara una descripción corta y significativa (ej. `UTE`), el script la descartaría y usaría el tipo de movimiento en su lugar, que sería peor. Si eso llega a pasar, la variante más segura es exigir además que el texto no tenga letras (o sea, tratar como relleno sólo puntuación y espacios).
 
 ## Cómo identificamos cada cuenta
 

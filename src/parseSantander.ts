@@ -51,6 +51,45 @@ function aNumero(v: unknown): number {
 }
 
 /**
+ * ¿Este texto de descripción aporta información real, o es un relleno del banco?
+ *
+ * Santander a veces manda descripciones que no dicen nada (el caso que motivó
+ * esto es un `"-"` en un "DEPOSITO CHEQUES  CLEARING"). El criterio acordado con
+ * administración: 3 caracteres o menos se considera relleno, sin importar cuáles
+ * sean — cubre `-`, `--`, `""`, `" "`, y cualquier variante parecida de un saque.
+ * Ninguna descripción real del banco es tan corta, así que no hay riesgo de
+ * descartar algo útil.
+ */
+function descripcionAportaInfo(descripcion: string): boolean {
+  return descripcion.trim().length > 3;
+}
+
+/**
+ * Arma el texto que va a terminar en la columna CONCEPTO de la planilla (y que
+ * después se le pasa a la IA para cotejar contra el listado de clientes).
+ *
+ * Prioridad: Descripción → Tipo Movimiento → Referencia.
+ *
+ * El fallback a Tipo Movimiento no es un invento: mirando el histórico de la
+ * planilla, cuando el banco no mandaba descripción administración cargaba a mano
+ * exactamente el tipo de movimiento (ej. una fila cargada como
+ * "DEPOSITO CHEQUES  CLEARING" coincide carácter por carácter con lo que trae esa
+ * columna, doble espacio incluido). O sea, esto reproduce lo que ya venían
+ * haciendo. La Referencia es el último recurso para no dejar el campo vacío si
+ * ni siquiera hay tipo de movimiento.
+ */
+function armarTextoParaMatchCliente(
+  descripcion: string,
+  tipoMovimiento: string,
+  referencia: string
+): string {
+  if (descripcionAportaInfo(descripcion)) return descripcion;
+  if (tipoMovimiento.trim() !== "") return tipoMovimiento;
+  if (referencia.trim() !== "") return referencia;
+  return descripcion; // no hay nada mejor: devolvemos lo que vino, aunque sea "-"
+}
+
+/**
  * @param rutaOWorkbook ruta al .xlsx, o un WorkBook de SheetJS ya leído
  * @param fechaObjetivo la fecha de la que queremos quedarnos con los movimientos
  */
@@ -113,8 +152,11 @@ export function parseSantander(
       tipo: debito !== 0 ? "debito" : "credito",
       monto: Math.abs(debito !== 0 ? debito : credito),
       descripcion,
-      // Santander no separa "asunto": el cliente hay que buscarlo dentro de la propia descripción.
-      textoParaMatchCliente: descripcion,
+      // Santander no separa "asunto": el cliente hay que buscarlo dentro de la propia
+      // descripción. Si la descripción no aporta nada (ej. "-"), caemos al Tipo de
+      // Movimiento — ver `armarTextoParaMatchCliente`. `descripcion` de arriba queda
+      // con el texto crudo del banco, sin tocar, por fidelidad del dato.
+      textoParaMatchCliente: armarTextoParaMatchCliente(descripcion, tipoMovimiento, referencia),
       referencia: referencia || undefined,
       categoriaBanco: tipoMovimiento || undefined,
       filaOriginal: i + 1,
