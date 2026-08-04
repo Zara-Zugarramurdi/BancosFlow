@@ -90,6 +90,19 @@ const COL = {
   SALDO: 8,
 } as const;
 
+/**
+ * Amarillo que ya usa la planilla para resaltar filas (confirmado mirando el
+ * color real de celdas resaltadas a mano en varias hojas: `FFFFFF99`). El
+ * patrón que se ve en la planilla real es resaltar desde FECHA hasta la
+ * columna del monto que corresponda (DEBE o HABER, según el movimiento) —
+ * SALDO se deja sin colorear, es el patrón más consistente entre las hojas.
+ */
+const AMARILLO_RESALTADO: ExcelJS.Fill = {
+  type: "pattern",
+  pattern: "solid",
+  fgColor: { argb: "FFFFFF99" },
+};
+
 export interface ResultadoActualizacion {
   cuenta: CuentaIdentificada;
   hoja: string;
@@ -500,10 +513,16 @@ export async function actualizarPlanilla(
 
     // Copiar el estilo (borde, fuente, alineación) de la fila ancla — así las filas
     // nuevas se ven igual que el resto del ledger, no en blanco/sin borde. Se copia
-    // ANTES de asignar los numFmt de abajo, que sí queremos que queden como los
-    // definimos explícitamente (fecha / moneda) y no lo que tuviera la fila ancla.
+    // ANTES de asignar los numFmt/fill de abajo, que sí queremos que queden como los
+    // definimos explícitamente. OJO: `cell.style = otraCelda.style` en ExcelJS copia
+    // una REFERENCIA compartida al mismo objeto de estilo interno, no una copia
+    // independiente — si no lo clonamos acá, pintar la fila nueva de amarillo más
+    // abajo termina pintando también la fila ancla (y cualquier otra celda que
+    // comparta ese mismo estilo), porque en el fondo es el mismo objeto. Lo
+    // confirmamos con un prototipo antes de aplicar el fix.
     for (let col = COL.FECHA; col <= COL.SALDO; col++) {
-      fila.getCell(col).style = hoja.getCell(filaAncla, col).style;
+      const celdaOrigen = hoja.getCell(filaAncla, col);
+      fila.getCell(col).style = JSON.parse(JSON.stringify(celdaOrigen.style));
     }
 
     fila.getCell(COL.FECHA).value = mov.fecha;
@@ -523,6 +542,14 @@ export async function actualizarPlanilla(
         formula: `H${filaActual - 1}+F${filaActual}-G${filaActual}`,
       } as ExcelJS.CellFormulaValue;
       fila.getCell(COL.SALDO).numFmt = "#,##0.00";
+    }
+
+    // Resaltar en amarillo (el mismo tono que ya usa la planilla a mano) desde
+    // FECHA hasta la columna del monto que corresponda — SALDO queda sin
+    // colorear, que es el patrón más consistente que encontramos en la planilla real.
+    const ultimaColumnaAResaltar = mov.tipo === "credito" ? COL.DEBE : COL.HABER;
+    for (let col = COL.FECHA; col <= ultimaColumnaAResaltar; col++) {
+      fila.getCell(col).fill = AMARILLO_RESALTADO;
     }
   }
 
