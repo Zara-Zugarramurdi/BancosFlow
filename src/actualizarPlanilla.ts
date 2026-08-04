@@ -143,6 +143,25 @@ function celdaFechaAClave(valor: ExcelJS.CellValue): string | null {
     const d = new Date(epoch.getTime() + valor * 24 * 60 * 60 * 1000);
     return fechaSoloDia(d);
   }
+  if (typeof valor === "string") {
+    // Algunas filas de la planilla real tienen la fecha cargada como TEXTO
+    // ("27/07/2026") en vez de como fecha de Excel — pasa cuando se pega desde
+    // otro lado. Sin esto, esas filas quedaban invisibles tanto para la detección
+    // del ancla como para el chequeo de duplicados.
+    const m = valor.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) {
+      const [, dd, mm, yyyy] = m;
+      const d = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd)));
+      // Validar que la fecha exista de verdad (evita aceptar cosas como 31/02/2026).
+      if (
+        d.getUTCFullYear() === Number(yyyy) &&
+        d.getUTCMonth() === Number(mm) - 1 &&
+        d.getUTCDate() === Number(dd)
+      ) {
+        return fechaSoloDia(d);
+      }
+    }
+  }
   return null;
 }
 
@@ -165,34 +184,48 @@ function claveMovimiento(fechaClave: string, tipo: "debito" | "credito", monto: 
   return `${fechaClave}|${tipo}|${redondear(monto).toFixed(2)}`;
 }
 
-function celdaEstaVacia(hoja: ExcelJS.Worksheet, fila: number): boolean {
-  return (
-    hoja.getCell(fila, COL.FECHA).value == null &&
-    hoja.getCell(fila, COL.CONCEPTO).value == null &&
-    hoja.getCell(fila, COL.DEBE).value == null &&
-    hoja.getCell(fila, COL.HABER).value == null &&
-    hoja.getCell(fila, COL.SALDO).value == null
-  );
+/**
+ * ¿Esta fila tiene una FECHA válida? Es el criterio que usamos para decidir si una
+ * fila es un movimiento real del ledger o no.
+ *
+ * Sólo miramos FECHA (y no CONCEPTO/DEBE/HABER/SALDO, como hacíamos antes) porque
+ * es lo único que distingue de forma confiable un movimiento real del relleno que
+ * tienen estas hojas. Probando contra la planilla real encontramos que mirar las
+ * otras columnas rompe la detección de dos formas distintas en la misma hoja
+ * (`SANTANDER $`):
+ *   - El bloque de proyección "PENDIENTES DE DEBITO" tiene CONCEPTO y SALDO pero
+ *     no es historia real, y quedaba contado como parte del ledger.
+ *   - Después de ese bloque había 5 filas donde alguien arrastró la fórmula de
+ *     SALDO de más, sin ningún movimiento: sin fecha, sin concepto, sin importes.
+ *     Como "tenían algo" en SALDO, también contaban como ledger.
+ * Resultado: el ancla daba la fila 3466 en vez de la 3454 (el último movimiento
+ * real), y los movimientos nuevos terminaban insertados DESPUÉS del bloque de
+ * pendientes, que se supone va siempre al final.
+ *
+ * Todo movimiento real tiene fecha; ninguna fila de relleno, proyección o
+ * fórmula-fantasma la tiene. Por eso este criterio es más simple y más robusto.
+ */
+function filaTieneFecha(hoja: ExcelJS.Worksheet, fila: number): boolean {
+  return celdaFechaAClave(hoja.getCell(fila, COL.FECHA).value) !== null;
 }
 
 /**
  * Encuentra la última fila del bloque CONTIGUO de movimientos reales, arrancando
  * en la fila 2 (debajo del encabezado) y parando en cuanto aparecen 3 o más filas
- * vacías seguidas. No mira las fechas (por los typos de fecha que encontramos en
- * la planilla real), sólo continuidad de datos.
+ * seguidas sin fecha.
  */
 function encontrarAnclaPorContiguidad(hoja: ExcelJS.Worksheet): number {
   const ultimaFilaHoja = hoja.actualRowCount || hoja.rowCount;
-  let vaciasSeguidas = 0;
+  let sinFechaSeguidas = 0;
   for (let fila = 2; fila <= ultimaFilaHoja + 3; fila++) {
-    const vacia = fila > ultimaFilaHoja || celdaEstaVacia(hoja, fila);
+    const vacia = fila > ultimaFilaHoja || !filaTieneFecha(hoja, fila);
     if (vacia) {
-      vaciasSeguidas++;
-      if (vaciasSeguidas >= 3) {
-        return fila - vaciasSeguidas;
+      sinFechaSeguidas++;
+      if (sinFechaSeguidas >= 3) {
+        return fila - sinFechaSeguidas;
       }
     } else {
-      vaciasSeguidas = 0;
+      sinFechaSeguidas = 0;
     }
   }
   // No encontramos ningún hueco de 3+ filas: la hoja es un bloque contiguo hasta el final.

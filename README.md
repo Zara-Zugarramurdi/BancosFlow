@@ -105,7 +105,18 @@ La primera versión de este script agregaba las filas nuevas después de la **ú
 
 La solución obvia — "usar la fila con la fecha más reciente" — tampoco es segura: hay fechas mal tipeadas a mano en medio del ledger real (`30/12/2026` en `SANTANDER $` en medio de datos de mediados de 2026; `29/05/2028` en `SANTANDER U$S` en medio de datos de 2024) que hubieran hecho que el script insertara en pleno medio de una cadena de fórmulas activa. Mucho más peligroso que el problema original.
 
-La heurística que sí funciona: el ledger real es un **bloque contiguo de filas sin huecos**, desde la fila 2 hasta la última fila con datos antes del primer salto de 3+ filas vacías seguidas. No importa la fecha de cada fila individual, sólo que no haya un hueco. Como confirmación extra, se cruza con una segunda señal independiente: en las 5 hojas, ese punto coincide exacto con el final del último rango de "fórmula compartida" de Excel en la columna SALDO (la forma en que Excel internamente recuerda "hasta acá se arrastró esta fórmula la última vez"). Si el punto de corte cayera en medio de un rango de fórmula compartida (en vez de coincidir con su final), el script frena con un error en vez de adivinar — mejor eso que arriesgarse a insertar en el lugar equivocado.
+La heurística que sí funciona: el ledger real es un **bloque contiguo de filas que tienen FECHA**, desde la fila 2 hasta la última antes del primer salto de 3+ filas seguidas sin fecha. El criterio clave es mirar **únicamente la columna FECHA** — no CONCEPTO/DEBE/HABER/SALDO. Todo movimiento real tiene fecha; ninguna fila de relleno, proyección o fórmula arrastrada de más la tiene.
+
+Esto último se aprendió a los golpes: la primera versión consideraba que una fila "tenía datos" si *cualquiera* de esas 5 columnas tenía algo, y eso rompía la detección en `SANTANDER $` de dos formas combinadas:
+
+- Entre el último movimiento real (fila 3454) y el bloque de proyección "PENDIENTES DE DEBITO" (3457) había sólo **2** filas vacías, no 3 — así que el corte no se activaba ahí, y el bloque de proyección (que tiene CONCEPTO y SALDO) quedaba contado como parte del ledger.
+- Después de ese bloque, alguien había arrastrado la fórmula de SALDO 5 filas de más (3462-3466), sin fecha, sin concepto y sin importes. Como "tenían algo" en SALDO, también contaban.
+
+Resultado: el ancla daba 3466 en vez de 3454, y los movimientos nuevos terminaban insertados **después** del bloque de pendientes, que se supone va siempre al final. Con el criterio de "sólo FECHA", el corte cae exacto en 3454 sin importar cuántas filas fantasma haya después. Se verificó además que el cambio no altera el resultado en ninguna de las otras 4 hojas, ni en la versión vieja de la planilla (misma fila de ancla que antes en los 5 casos).
+
+Como red de seguridad adicional, el ancla se cruza con los rangos de "fórmula compartida" de Excel en la columna SALDO: si el punto de corte cayera *en medio* de uno de esos rangos, el script frena con un error en vez de adivinar.
+
+**Nota sobre fechas en texto:** algunas filas de la planilla real tienen la fecha cargada como texto (`"27/07/2026"`) en vez de como fecha de Excel — pasa cuando se pega desde otro lado. La función que lee fechas entiende los tres formatos (fecha real, número de serie de Excel, y texto `dd/mm/yyyy` validado), así que esas filas no quedan invisibles ni para la detección del ancla ni para el chequeo de duplicados.
 
 ### Cómo se reajustan las fórmulas al insertar (validado con recálculo real, no sólo mirando el texto)
 
@@ -118,6 +129,15 @@ Esto **no se validó sólo mirando que el texto de la fórmula "se viera bien"**
 También se probaron y confirmaron correctas, después de actualizar las 4 cuentas de una sola vez sobre la misma planilla:
 - Las 5 fórmulas que cruzan de una hoja a otra en toda la planilla (2 "totales" generales en `BROU $`, 1 en `BROU U$S` hacia `SANTANDER U$S`, 2 en `SANTANDER $` hacia `SANTANDER U$S`) — todas quedaron exactamente iguales a como estaban (porque las filas que referencian están antes de donde insertamos en cada caso), y sus valores recalculados coinciden con los originales.
 - Correr el mismo comando 2 veces seguidas: la segunda vez no agrega nada (el archivo queda byte a byte idéntico — se comparó el hash).
+- Las hojas que no se tocan en cada corrida (`BROU EUROS`, `SANTANDER CA $U`, `SANTANDER CA U$S`, `SANTANDER EUROS`, `DIFERIDOS TD`, `CUENTAS EMPLEADOS`) quedan con **0 diferencias** celda por celda.
+
+Esta batería se corrió sobre **dos versiones distintas de la planilla real** (la del 20/07 y la del 04/08) con sus respectivos estados de cuenta, para asegurarse de que los cambios de detección de ancla no rompieran el comportamiento que ya funcionaba. En las 5 hojas de la planilla vieja, el ancla calculada es idéntica antes y después del cambio de criterio.
+
+### Estado del bloque "PENDIENTES DE DEBITO" al insertar
+
+Cuando se insertan movimientos nuevos, el bloque de proyección "PENDIENTES DE DEBITO" se corre hacia abajo correctamente, pero su fórmula inicial (`=H{fila}`) sigue apuntando a la fila que apuntaba antes — o sea, al saldo del que era el último movimiento real *antes* de la corrida, no al nuevo. Ej.: tras cargar los movimientos del 03/08 en `SANTANDER $`, el bloque sigue partiendo del saldo del 31/07.
+
+Esto se consultó con administración y se decidió **dejarlo así a propósito**: el script no toca esa referencia. Si en algún momento se quiere que la proyección parta siempre del saldo más reciente, es un cambio chico pero hay que pedirlo explícitamente.
 
 ### Duplicados: por qué la clave NO es "misma fecha + misma descripción + mismo textoParaMatchCliente"
 
@@ -129,7 +149,7 @@ El texto (`CONCEPTO`/`textoParaMatchCliente`) no se usa para la detección de du
 
 ### Caveats conocidos
 
-- **`BROU EUROS` no se probó con un estado de cuenta real** (no había ninguno entre los archivos de ejemplo). El código es genérico y la hoja mostró el mismo patrón que las otras 4 (bloque contiguo terminando exacto donde termina el último rango de fórmula compartida), así que debería funcionar igual, pero conviene que la primera corrida real se revise a mano.
+- **`BROU EUROS` no se probó con un estado de cuenta real** (no había ninguno entre los archivos de ejemplo). El código es genérico y la hoja mostró el mismo patrón que las otras 4 (bloque contiguo de filas con fecha, terminando de forma limpia), así que debería funcionar igual, pero conviene que la primera corrida real se revise a mano.
 - **Correcciones con fecha retroactiva después de ya haber cargado fechas posteriores**: si el banco corrige/reenvía un movimiento de una fecha vieja después de que ya cargaron movimientos de fechas más nuevas, el script lo va a agregar al final (después de lo más nuevo), no intercalado cronológicamente en su lugar — porque el "ancla" para ese momento ya es la fila más reciente. Es un caso borde poco frecuente; si llega a pasar, esa fila puntual se puede reubicar a mano.
 - **Columna B (`RECIBO...`)**: al re-guardar con ExcelJS, alguna celda numérica de esa columna (que no usamos para nada) puede pasar a guardarse como texto. No afecta plata ni fechas.
 
