@@ -51,42 +51,59 @@ function aNumero(v: unknown): number {
 }
 
 /**
- * ¿Este texto de descripción aporta información real, o es un relleno del banco?
+ * ¿La descripción es demasiado corta como para valerse por sí sola?
  *
  * Santander a veces manda descripciones que no dicen nada (el caso que motivó
- * esto es un `"-"` en un "DEPOSITO CHEQUES  CLEARING"). El criterio acordado con
- * administración: 3 caracteres o menos se considera relleno, sin importar cuáles
- * sean — cubre `-`, `--`, `""`, `" "`, y cualquier variante parecida de un saque.
- * Ninguna descripción real del banco es tan corta, así que no hay riesgo de
- * descartar algo útil.
+ * esto es un `"-"` en un "DEPOSITO CHEQUES  CLEARING"). Criterio acordado con
+ * administración: 3 caracteres o menos.
  */
-function descripcionAportaInfo(descripcion: string): boolean {
-  return descripcion.trim().length > 3;
+function descripcionEsCorta(descripcion: string): boolean {
+  return descripcion.trim().length <= 3;
 }
 
 /**
  * Arma el texto que va a terminar en la columna CONCEPTO de la planilla (y que
  * después se le pasa a la IA para cotejar contra el listado de clientes).
  *
- * Prioridad: Descripción → Tipo Movimiento → Referencia.
+ * Reglas:
+ *   1. Descripción normal (más de 3 caracteres) → se usa tal cual.
+ *   2. Descripción corta → se combina con el Tipo de Movimiento:
+ *      `"UTE"` + `"DEBITO AUTOMATICO"` → `"UTE - DEBITO AUTOMATICO"`.
+ *      Se concatena SIEMPRE, aunque la descripción sea un `"-"` (queda
+ *      `"- - DEPOSITO CHEQUES  CLEARING"`). Es a propósito: preferimos un poco de
+ *      ruido antes que arriesgarnos a tirar información. Una descripción corta
+ *      puede ser justamente el nombre del cliente — en la planilla hay cientos de
+ *      conceptos cargados a mano con siglas de 3 letras (DUA, BSE, UTE, SMI, OSE,
+ *      BPS, DGI...), así que descartarlas sería peor que el ruido.
+ *      Única excepción: si la descripción está vacía no hay nada que preservar, así
+ *      que va sólo el Tipo de Movimiento (concatenar dejaría un separador colgando).
+ *   3. Sin Tipo de Movimiento → se cae a la Referencia, y como último recurso se
+ *      devuelve la descripción cruda para no dejar el campo vacío.
  *
- * El fallback a Tipo Movimiento no es un invento: mirando el histórico de la
+ * El uso del Tipo de Movimiento no es un invento: mirando el histórico de la
  * planilla, cuando el banco no mandaba descripción administración cargaba a mano
  * exactamente el tipo de movimiento (ej. una fila cargada como
  * "DEPOSITO CHEQUES  CLEARING" coincide carácter por carácter con lo que trae esa
- * columna, doble espacio incluido). O sea, esto reproduce lo que ya venían
- * haciendo. La Referencia es el último recurso para no dejar el campo vacío si
- * ni siquiera hay tipo de movimiento.
+ * columna, doble espacio incluido). O sea, esto reproduce lo que ya venían haciendo.
  */
 function armarTextoParaMatchCliente(
   descripcion: string,
   tipoMovimiento: string,
   referencia: string
 ): string {
-  if (descripcionAportaInfo(descripcion)) return descripcion;
-  if (tipoMovimiento.trim() !== "") return tipoMovimiento;
-  if (referencia.trim() !== "") return referencia;
-  return descripcion; // no hay nada mejor: devolvemos lo que vino, aunque sea "-"
+  const desc = descripcion.trim();
+  const tipo = tipoMovimiento.trim();
+  const ref = referencia.trim();
+
+  if (!descripcionEsCorta(desc)) return desc;
+
+  if (tipo !== "") {
+    return desc === "" ? tipo : `${desc} - ${tipo}`;
+  }
+
+  if (desc !== "") return desc;
+  if (ref !== "") return ref;
+  return descripcion;
 }
 
 /**
