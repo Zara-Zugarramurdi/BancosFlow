@@ -70,7 +70,7 @@ import { parseSantander } from "./parseSantander";
 import type { CuentaIdentificada, CuentaKey, MovimientoLimpio } from "./types";
 
 /** A qué hoja de la planilla maestra corresponde cada cuenta. */
-const MAPA_HOJAS: Record<CuentaKey, string> = {
+export const MAPA_HOJAS: Record<CuentaKey, string> = {
   BROU_PESOS: "BROU $",
   BROU_DOLARES: "BROU U$S",
   BROU_EUROS: "BROU EUROS",
@@ -79,7 +79,7 @@ const MAPA_HOJAS: Record<CuentaKey, string> = {
 };
 
 // Columnas fijas dentro de cada hoja (1-based, como las usa ExcelJS).
-const COL = {
+export const COL = {
   FECHA: 1,
   RECIBO: 2,
   NUM_CHEQUE: 3,
@@ -135,7 +135,7 @@ function fechaSoloDia(d: Date): string {
 }
 
 /** Convierte lo que venga en la celda FECHA de la planilla (Date, string o número) a "yyyy-mm-dd". */
-function celdaFechaAClave(valor: ExcelJS.CellValue): string | null {
+export function celdaFechaAClave(valor: ExcelJS.CellValue): string | null {
   if (!valor) return null;
   if (valor instanceof Date) return fechaSoloDia(valor);
   if (typeof valor === "number") {
@@ -260,7 +260,7 @@ function obtenerRangosFormulaCompartida(hoja: ExcelJS.Worksheet): Array<{ inicio
  * ahí. Que el ancla coincida con el FINAL de un rango (el caso normal) o que no
  * haya ningún rango compartido cerca (hojas más chicas, como BROU EUROS) está bien.
  */
-function encontrarFilaAncla(hoja: ExcelJS.Worksheet): number {
+export function encontrarFilaAncla(hoja: ExcelJS.Worksheet): number {
   const ancla = encontrarAnclaPorContiguidad(hoja);
   const rangos = obtenerRangosFormulaCompartida(hoja);
   const rangoQueCruza = rangos.find((r) => r.inicio <= ancla && ancla < r.fin);
@@ -459,7 +459,6 @@ export async function actualizarPlanilla(
   fechaObjetivo: Date,
   rutaSalida: string = rutaPlanilla
 ): Promise<ResultadoActualizacion> {
-  // 1. Parsear el estado de cuenta con la lógica que ya teníamos.
   const workbookEstado = XLSX.readFile(rutaEstadoDeCuenta);
   const cuenta = identificarCuenta(workbookEstado);
   const movimientos =
@@ -467,6 +466,30 @@ export async function actualizarPlanilla(
       ? parseBrou(workbookEstado, fechaObjetivo)
       : parseSantander(workbookEstado, fechaObjetivo);
 
+  return aplicarMovimientosAPlanilla(rutaPlanilla, cuenta, movimientos, rutaSalida);
+}
+
+/**
+ * Núcleo compartido: dado un conjunto de movimientos YA parseados y la cuenta a la
+ * que corresponden, los inserta en la hoja adecuada de la planilla.
+ *
+ * Está separado de `actualizarPlanilla` para que otros puntos de entrada (hoy
+ * `actualizarDesdeUltimaFecha`) reutilicen exactamente la misma lógica de inserción
+ * —ancla, deduplicación, desarmado de fórmulas compartidas, corrimiento de
+ * referencias, estilos y resaltado— en lugar de duplicarla. La extracción se hizo
+ * como un movimiento puro de código, sin cambios de comportamiento: la batería de
+ * pruebas sobre las planillas reales da resultados idénticos a antes del refactor.
+ *
+ * IMPORTANTE: los movimientos se insertan en el orden en que vienen en el array.
+ * Quien llama es responsable de ordenarlos cronológicamente si abarcan más de un día
+ * (BROU, por ejemplo, entrega sus movimientos con el más nuevo primero).
+ */
+export async function aplicarMovimientosAPlanilla(
+  rutaPlanilla: string,
+  cuenta: CuentaIdentificada,
+  movimientos: MovimientoLimpio[],
+  rutaSalida: string = rutaPlanilla
+): Promise<ResultadoActualizacion> {
   // 2. Abrir la planilla maestra y ubicar la hoja que corresponde.
   const nombreHoja = MAPA_HOJAS[cuenta.cuentaKey];
   const workbookPlanilla = new ExcelJS.Workbook();

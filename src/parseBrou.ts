@@ -62,6 +62,23 @@ export function parseBrou(
   rutaOWorkbook: string | XLSX.WorkBook,
   fechaObjetivo: Date
 ): MovimientoLimpio[] {
+  return parseBrouConFiltro(rutaOWorkbook, (fecha) => mismodia(fecha, fechaObjetivo));
+}
+
+/**
+ * Igual que `parseBrou`, pero en vez de un día fijo recibe un predicado que decide
+ * qué fechas entran. Lo usa `actualizarDesdeUltimaFecha` para traer un rango de días
+ * en una sola pasada; `parseBrou` quedó como un envoltorio de un solo día para no
+ * cambiarle la firma a nada de lo que ya funcionaba.
+ *
+ * OJO con el orden: BROU devuelve los movimientos con el más NUEVO primero
+ * (verificado con archivos reales: 10/08 → 07/08 → ... → 06/08). Esta función
+ * respeta el orden del archivo; ordenar es responsabilidad de quien la llama.
+ */
+export function parseBrouConFiltro(
+  rutaOWorkbook: string | XLSX.WorkBook,
+  incluirFecha: (fecha: Date) => boolean
+): MovimientoLimpio[] {
   const workbook =
     typeof rutaOWorkbook === "string" ? XLSX.readFile(rutaOWorkbook) : rutaOWorkbook;
 
@@ -95,7 +112,7 @@ export function parseBrou(
     const fechaSerial = typeof fechaRaw === "number" ? fechaRaw : aNumero(fechaRaw);
     const fecha = serialAFecha(fechaSerial);
 
-    if (!mismodia(fecha, fechaObjetivo)) continue;
+    if (!incluirFecha(fecha)) continue;
 
     const descripcion = String(fila[1] ?? "").trim();
     const numeroDocumento = String(fila[3] ?? "").trim();

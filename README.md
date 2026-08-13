@@ -21,6 +21,7 @@ Dependencia clave: [`xlsx` (SheetJS)](https://www.npmjs.com/package/xlsx). Es la
 - **`src/parseSantander.ts`** — ídem para el formato Santander.
 - **`src/procesarEstadoDeCuenta.ts`** — orquestador: detecta el formato solo y llama al parser que corresponda. **Este es el que probablemente quieras llamar desde el proceso principal.**
 - **`src/actualizarPlanilla.ts`** — toma la planilla maestra + un estado de cuenta ya identificado/parseado, e inserta los movimientos nuevos en el lugar correcto de la hoja. Ver sección dedicada más abajo.
+- **`src/actualizarDesdeUltimaFecha.ts`** — igual que el anterior pero sin pasarle fecha: detecta hasta qué día está cargada la planilla y agrega todo lo posterior. Ver sección dedicada más abajo.
 
 ## Uso
 
@@ -161,6 +162,51 @@ El texto (`CONCEPTO`/`textoParaMatchCliente`) no se usa para la detección de du
 - **`BROU EUROS` no se probó con un estado de cuenta real** (no había ninguno entre los archivos de ejemplo). El código es genérico y la hoja mostró el mismo patrón que las otras 4 (bloque contiguo de filas con fecha, terminando de forma limpia), así que debería funcionar igual, pero conviene que la primera corrida real se revise a mano.
 - **Correcciones con fecha retroactiva después de ya haber cargado fechas posteriores**: si el banco corrige/reenvía un movimiento de una fecha vieja después de que ya cargaron movimientos de fechas más nuevas, el script lo va a agregar al final (después de lo más nuevo), no intercalado cronológicamente en su lugar — porque el "ancla" para ese momento ya es la fila más reciente. Es un caso borde poco frecuente; si llega a pasar, esa fila puntual se puede reubicar a mano.
 - **Columna B (`RECIBO...`)**: al re-guardar con ExcelJS, alguna celda numérica de esa columna (que no usamos para nada) puede pasar a guardarse como texto. No afecta plata ni fechas.
+
+## Poner la planilla al día sin indicar fecha
+
+**`src/actualizarDesdeUltimaFecha.ts`** — variante de `actualizarPlanilla` que no recibe una fecha: mira hasta qué día está cargada la hoja y agrega todo lo que el estado de cuenta tenga de ahí en adelante, en una sola pasada.
+
+```bash
+node dist/actualizarDesdeUltimaFecha.js "C:\ruta\bancos.xlsx" "C:\ruta\estado.xlsx" ["C:\ruta\salida.xlsx"]
+```
+
+Reutiliza el núcleo de inserción de `actualizarPlanilla` (`aplicarMovimientosAPlanilla`), así que hereda tal cual la deduplicación, el cálculo del ancla, el desarmado de fórmulas compartidas, el corrimiento de referencias, la copia de estilos y el resaltado en amarillo. Lo propio de este archivo es sólo *qué* movimientos elegir y *en qué orden* entregarlos.
+
+### Cómo sabe hasta dónde está cargada la planilla
+
+Usa la fecha de la **fila ancla** (la última fila del bloque contiguo del ledger), **no** el máximo de las fechas. Es deliberado: la posición manda, no el valor. En la planilla real, la fecha máxima de `BROU $` es 28/02/2027 — un error de tipeo por 2023, ya que la fila siguiente vuelve a 01/03/2023; también hay una fila con fecha de 1928. Si el proceso preguntara "cuál es la fecha más alta", concluiría que la planilla está al día hasta 2027 y no volvería a agregar nada nunca.
+
+Como la fila ancla misma podría tener una fecha mal tipeada, hay dos chequeos de cordura que abortan con un mensaje claro en lugar de saltearse movimientos en silencio:
+
+- La última fecha cargada no puede ser posterior a hoy.
+- No puede haber un salto de más de 90 días respecto de la fila con fecha inmediatamente anterior.
+
+### El rango arranca en la última fecha cargada, inclusive
+
+No en el día siguiente. Si ese día se había cargado a mitad de jornada, o el banco sumó movimientos tarde, arrancar al día siguiente los perdería para siempre y en silencio. Al incluirlo, la deduplicación (fecha + tipo + monto, contando repeticiones) descarta los que ya están y agrega sólo los que faltaban. Se puede cambiar a estricto con `incluirUltimaFecha: false`.
+
+Esto no es teórico: probando con la planilla del 10/08 y su estado de cuenta de BROU Pesos, el proceso encontró **3 movimientos del 07/08 que faltaban** además del único del 10/08. Con el criterio estricto se habrían perdido.
+
+### Orden de inserción
+
+Los movimientos se ordenan cronológicamente antes de insertar, de más viejo a más nuevo, manteniendo estable el orden dentro de un mismo día. Hace falta porque **BROU entrega sus estados de cuenta con el movimiento más nuevo primero** (verificado con archivos reales: `10/08 → 07/08 → ... → 06/08`), mientras que Santander los entrega en orden ascendente. Cuando se procesaba un solo día daba igual; al insertar un rango de varios días, respetar el orden del archivo dejaría el ledger al revés.
+
+Dentro de un mismo día se conserva el orden del archivo: es el único criterio disponible, ya que los estados de cuenta no traen hora.
+
+### Días que el estado de cuenta no cubre
+
+Si el movimiento más antiguo del estado de cuenta es posterior a la última fecha cargada, quedan días en el medio que nadie va a cargar (ej. planilla al 20/07 y estado de cuenta que arranca el 28/07). El proceso **avisa y continúa** — si Administración no descargó esos días, no hay nada que el script pueda hacer, pero conviene que quede a la vista.
+
+### Pruebas
+
+- **Equivalencia**: procesar un rango con esta función da un resultado idéntico celda por celda a correr `actualizarPlanilla` día por día sobre ese mismo rango.
+- **Regresión**: tras extraer el núcleo compartido, `actualizarPlanilla` produce exactamente los mismos resultados que antes del refactor (mismas cantidades, mismas filas) sobre las planillas de julio y agosto.
+- **Punta a punta** sobre la planilla del 13/08 con las 4 cuentas, encontrando cada hoja en un estado distinto (dos al día, dos atrasadas): 14 movimientos insertados en total, orden cronológico correcto, idempotencia (mismo hash al repetir), saldos verificados con recálculo real en LibreOffice y 0 diferencias en las 6 hojas no involucradas.
+
+### Limitación conocida
+
+Si la fila ancla tuviera una fecha mal tipeada **hacia atrás** (ej. enero en vez de julio), el proceso re-escanearía desde esa fecha y podría insertar movimientos viejos al final del ledger, fuera de orden cronológico. No se bloquea porque en el ledger real hay varios saltos hacia atrás legítimos y el chequeo saltaría en falso constantemente. Los typos hacia adelante, que son los peligrosos porque harían saltear meses de movimientos, sí están cubiertos.
 
 ## Siguientes pasos sugeridos
 

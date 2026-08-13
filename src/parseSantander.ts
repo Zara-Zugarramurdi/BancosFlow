@@ -114,6 +114,23 @@ export function parseSantander(
   rutaOWorkbook: string | XLSX.WorkBook,
   fechaObjetivo: Date
 ): MovimientoLimpio[] {
+  return parseSantanderConFiltro(rutaOWorkbook, (fecha) => mismodia(fecha, fechaObjetivo));
+}
+
+/**
+ * Igual que `parseSantander`, pero en vez de un día fijo recibe un predicado que
+ * decide qué fechas entran. Lo usa `actualizarDesdeUltimaFecha` para traer un rango
+ * de días en una sola pasada; `parseSantander` quedó como un envoltorio de un solo
+ * día para no cambiarle la firma a nada de lo que ya funcionaba.
+ *
+ * Santander sí devuelve los movimientos en orden cronológico ascendente, al revés
+ * que BROU. Esta función respeta el orden del archivo; ordenar es responsabilidad
+ * de quien la llama.
+ */
+export function parseSantanderConFiltro(
+  rutaOWorkbook: string | XLSX.WorkBook,
+  incluirFecha: (fecha: Date) => boolean
+): MovimientoLimpio[] {
   const workbook =
     typeof rutaOWorkbook === "string" ? XLSX.readFile(rutaOWorkbook) : rutaOWorkbook;
 
@@ -152,7 +169,7 @@ export function parseSantander(
     const fecha = textoAFecha(fechaRaw);
     if (!fecha) continue; // fila rara, no tiene formato de fecha reconocible
 
-    if (!mismodia(fecha, fechaObjetivo)) continue;
+    if (!incluirFecha(fecha)) continue;
 
     const referencia = String(fila[1] ?? "").trim();
     const tipoMovimiento = String(fila[2] ?? "").trim();
