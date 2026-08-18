@@ -47,13 +47,18 @@ for (const m of movimientos) {
 Cada `movimiento` trae el campo **`textoParaMatchCliente`** — es el texto que le pasarías a Hermes/DeepSeek junto con tu listado de clientes para que sugiera a quién corresponde, y es también lo que se escribe en la columna CONCEPTO de la planilla.
 
 - **BROU**: la columna "Asunto"; si viene vacía, la Descripción.
-- **Santander**: la Descripción (no hay columna de asunto separada); si la descripción es **corta (3 caracteres o menos)**, se combina con el **Tipo de Movimiento** — ej. `"UTE"` + `"DEBITO AUTOMATICO"` → `"UTE - DEBITO AUTOMATICO"`.
+- **BROU**: la columna "Asunto"; si no se vale por sí sola, se completa con la Descripción.
+- **Santander**: la Descripción (no hay columna de asunto separada); si no se vale por sí sola, se completa con el Tipo de Movimiento, y como último recurso con la Referencia.
 
-La concatenación se hace **siempre** que la descripción sea corta, incluso cuando es un `"-"` (queda `"- - DEPOSITO CHEQUES  CLEARING"`). Es a propósito: se prefiere un poco de ruido antes que arriesgarse a descartar información. Una descripción corta puede ser justamente el nombre del cliente — en la planilla hay cientos de conceptos cargados a mano con siglas de 3 letras: `DUA` (171 veces), `BSE` (89), `UTE` (78), `SMI` (74), `OSE` (48), `BPS`, `DGI`, `IMM`, etc. Si en el futuro molesta el ruido de los `-`, se puede afinar para no concatenar cuando la descripción es pura puntuación, pero eso vuelve a introducir el riesgo de tirar algo útil.
+El criterio de "no se vale por sí solo" es común a ambos bancos y vive en `src/textoConcepto.ts`. Alcanza con que se cumpla uno de los tres:
 
-Única excepción: si la descripción viene vacía no hay nada que preservar, así que va sólo el Tipo de Movimiento (concatenar dejaría un separador colgando). Y si no hay Tipo de Movimiento, se cae a la Referencia.
+1. **Está vacío.** No hay nada que preservar.
+2. **Tiene menos de 5 caracteres.** Ningún texto tan corto identifica por sí solo a un cliente de forma confiable.
+3. **No contiene ninguna letra.** Un texto de puros números o signos (`"3507"`, `"24609930"`, `"-"`, `"--"`) es una referencia interna del banco, no un nombre. Se expresa como "no tiene letras" en vez de "son todos dígitos" para cubrir también números con separadores (`"3.507"`) sin enumerar cada variante.
 
-El uso del Tipo de Movimiento no es un invento: mirando el histórico de la planilla, cuando el banco no mandaba descripción administración cargaba a mano exactamente el tipo de movimiento (una fila cargada como `DEPOSITO CHEQUES  CLEARING` coincide carácter por carácter con esa columna, doble espacio incluido). En los 4 estados de cuenta de ejemplo la combinación se activa en 2 de 85 movimientos. El campo `descripcion` mantiene siempre el texto crudo del banco, sin tocar.
+En esos casos **se concatena, no se reemplaza**: `"3507"` + `"TRF SPI PAGO PROV."` queda `"3507 - TRF SPI PAGO PROV."`. Se concatena incluso cuando el principal es un `"-"` (queda `"- - DEPOSITO CHEQUES  CLEARING"`). Es una decisión explícita: se prefiere un poco de ruido antes que arriesgarse a descartar información. Un texto corto puede ser justamente el cliente — en los estados de cuenta reales aparecen `"ITAU"` y `"BBVA"` como asunto de BROU, y en la planilla hay cientos de conceptos cargados a mano con siglas de 3 y 4 letras (DUA, BSE, UTE, SMI, OSE, BPS, DGI...). Única excepción: si el principal está vacío va sólo el respaldo, porque concatenar dejaría un separador colgando.
+
+Medido sobre los 4 estados de cuenta del 18/08 (72 movimientos), la regla se activa en 6: los `"ITAU"`/`"BBVA"` y `"3507"` de BROU, y un `"24609930"` de Santander. El campo `descripcion` mantiene siempre el texto crudo del banco, sin tocar.
 
 ## Cómo identificamos cada cuenta
 

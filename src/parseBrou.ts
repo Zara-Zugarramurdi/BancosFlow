@@ -16,6 +16,7 @@
 import * as XLSX from "xlsx";
 import { identificarCuenta } from "./accountIdentifier";
 import type { MovimientoLimpio } from "./types";
+import { combinarConRespaldo } from "./textoConcepto";
 
 const ENCABEZADO_ESPERADO = ["Fecha", "Descripción"];
 
@@ -131,9 +132,10 @@ export function parseBrouConFiltro(
       tipo: debito !== 0 ? "debito" : "credito",
       monto: debito !== 0 ? debito : credito,
       descripcion,
-      // En BROU el cliente casi siempre está en "Asunto"; si viene vacío,
-      // usamos la descripción como respaldo para que la IA igual tenga algo para cotejar.
-      textoParaMatchCliente: asunto || descripcion,
+      // En BROU el cliente casi siempre está en "Asunto". Si ese asunto no se vale por
+      // sí solo (vacío, muy corto, o sin letras) se lo completa con la Descripción —
+      // mismo criterio que se aplica en Santander, ver `textoConcepto.ts`.
+      textoParaMatchCliente: combinarConRespaldo(asunto, descripcion),
       referencia: numeroDocumento || undefined,
       categoriaBanco: dependencia || undefined,
       filaOriginal: i + 1, // 1-based, como lo vería un humano abriendo el Excel

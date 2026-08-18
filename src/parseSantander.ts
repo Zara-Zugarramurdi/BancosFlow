@@ -15,6 +15,7 @@
 import * as XLSX from "xlsx";
 import { identificarCuenta } from "./accountIdentifier";
 import type { MovimientoLimpio } from "./types";
+import { combinarConRespaldo } from "./textoConcepto";
 
 function hojaAMatriz(sheet: XLSX.WorkSheet): unknown[][] {
   return XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "" }) as unknown[][];
@@ -48,62 +49,6 @@ function aNumero(v: unknown): number {
   if (typeof v === "number") return v;
   const n = Number(String(v).replace(/\./g, "").replace(",", "."));
   return Number.isNaN(n) ? 0 : n;
-}
-
-/**
- * ¿La descripción es demasiado corta como para valerse por sí sola?
- *
- * Santander a veces manda descripciones que no dicen nada (el caso que motivó
- * esto es un `"-"` en un "DEPOSITO CHEQUES  CLEARING"). Criterio acordado con
- * administración: 3 caracteres o menos.
- */
-function descripcionEsCorta(descripcion: string): boolean {
-  return descripcion.trim().length <= 3;
-}
-
-/**
- * Arma el texto que va a terminar en la columna CONCEPTO de la planilla (y que
- * después se le pasa a la IA para cotejar contra el listado de clientes).
- *
- * Reglas:
- *   1. Descripción normal (más de 3 caracteres) → se usa tal cual.
- *   2. Descripción corta → se combina con el Tipo de Movimiento:
- *      `"UTE"` + `"DEBITO AUTOMATICO"` → `"UTE - DEBITO AUTOMATICO"`.
- *      Se concatena SIEMPRE, aunque la descripción sea un `"-"` (queda
- *      `"- - DEPOSITO CHEQUES  CLEARING"`). Es a propósito: preferimos un poco de
- *      ruido antes que arriesgarnos a tirar información. Una descripción corta
- *      puede ser justamente el nombre del cliente — en la planilla hay cientos de
- *      conceptos cargados a mano con siglas de 3 letras (DUA, BSE, UTE, SMI, OSE,
- *      BPS, DGI...), así que descartarlas sería peor que el ruido.
- *      Única excepción: si la descripción está vacía no hay nada que preservar, así
- *      que va sólo el Tipo de Movimiento (concatenar dejaría un separador colgando).
- *   3. Sin Tipo de Movimiento → se cae a la Referencia, y como último recurso se
- *      devuelve la descripción cruda para no dejar el campo vacío.
- *
- * El uso del Tipo de Movimiento no es un invento: mirando el histórico de la
- * planilla, cuando el banco no mandaba descripción administración cargaba a mano
- * exactamente el tipo de movimiento (ej. una fila cargada como
- * "DEPOSITO CHEQUES  CLEARING" coincide carácter por carácter con lo que trae esa
- * columna, doble espacio incluido). O sea, esto reproduce lo que ya venían haciendo.
- */
-function armarTextoParaMatchCliente(
-  descripcion: string,
-  tipoMovimiento: string,
-  referencia: string
-): string {
-  const desc = descripcion.trim();
-  const tipo = tipoMovimiento.trim();
-  const ref = referencia.trim();
-
-  if (!descripcionEsCorta(desc)) return desc;
-
-  if (tipo !== "") {
-    return desc === "" ? tipo : `${desc} - ${tipo}`;
-  }
-
-  if (desc !== "") return desc;
-  if (ref !== "") return ref;
-  return descripcion;
 }
 
 /**
@@ -190,7 +135,7 @@ export function parseSantanderConFiltro(
       // descripción. Si la descripción no aporta nada (ej. "-"), caemos al Tipo de
       // Movimiento — ver `armarTextoParaMatchCliente`. `descripcion` de arriba queda
       // con el texto crudo del banco, sin tocar, por fidelidad del dato.
-      textoParaMatchCliente: armarTextoParaMatchCliente(descripcion, tipoMovimiento, referencia),
+      textoParaMatchCliente: combinarConRespaldo(descripcion, tipoMovimiento, referencia),
       referencia: referencia || undefined,
       categoriaBanco: tipoMovimiento || undefined,
       filaOriginal: i + 1,
