@@ -114,6 +114,8 @@ Internamente:
 | — | `CONCEPTO` | Se completa con `textoParaMatchCliente` — el mismo texto "limpio" que ya usábamos para el matching de IA. |
 | — | `SALDO` | Fórmula `=H{fila anterior}+F{fila}-G{fila}`, encadenada normalmente, sólo si la fila ancla ya tenía algo en SALDO. |
 
+Las filas insertadas se resaltan en amarillo (`FFFFFF99`, el mismo tono que usa la planilla a mano) **en toda su extensión, de FECHA a SALDO** — no sólo las celdas con contenido, para que no queden resaltadas a medias.
+
 ### Dónde se insertan las filas nuevas (y por qué esto cambió durante el desarrollo)
 
 La primera versión de este script agregaba las filas nuevas después de la **última fila con cualquier dato** de la hoja, para no arriesgarse a insertar en el medio de miles de fórmulas encadenadas. Probando contra la hoja real `"BROU $"` encontramos el problema: después del último movimiento real (fila 7043, 17/07/2026) hay varios bloques que **no son movimientos del día a día** — una proyección `"PENDIENTES DE DEBITO"`, un bloque viejo con fechas de 2025 que quedó pegado de una versión anterior, una lista fija de `"RETENCION JUDICIAL..."`, y el cronograma de un préstamo (`"PROYECTO BOTIJAS"`) que reutiliza la columna E para otra cosa. La "última fila con datos" terminaba **55 filas más abajo** del final real del ledger, así que los movimientos nuevos quedaban invisibles para quien mira la hoja esperando encontrarlos justo debajo del último movimiento — el mismo problema que reportaron.

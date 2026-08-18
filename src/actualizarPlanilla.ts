@@ -92,10 +92,8 @@ export const COL = {
 
 /**
  * Amarillo que ya usa la planilla para resaltar filas (confirmado mirando el
- * color real de celdas resaltadas a mano en varias hojas: `FFFFFF99`). El
- * patrón que se ve en la planilla real es resaltar desde FECHA hasta la
- * columna del monto que corresponda (DEBE o HABER, según el movimiento) —
- * SALDO se deja sin colorear, es el patrón más consistente entre las hojas.
+ * color real de celdas resaltadas a mano en varias hojas: `FFFFFF99`). Se aplica
+ * a la fila entera del ledger, de FECHA a SALDO.
  */
 const AMARILLO_RESALTADO: ExcelJS.Fill = {
   type: "pattern",
@@ -600,11 +598,11 @@ export async function aplicarMovimientosAPlanilla(
       fila.getCell(COL.SALDO).numFmt = "#,##0.00";
     }
 
-    // Resaltar en amarillo (el mismo tono que ya usa la planilla a mano) desde
-    // FECHA hasta la columna del monto que corresponda — SALDO queda sin
-    // colorear, que es el patrón más consistente que encontramos en la planilla real.
-    const ultimaColumnaAResaltar = mov.tipo === "credito" ? COL.DEBE : COL.HABER;
-    for (let col = COL.FECHA; col <= ultimaColumnaAResaltar; col++) {
+    // Resaltar en amarillo (el mismo tono que ya usa la planilla a mano) la fila
+    // ENTERA del ledger, de FECHA a SALDO. Antes se pintaba sólo hasta la columna
+    // del monto, dejando sin color las celdas vacías del medio y la de SALDO, lo
+    // que hacía que las filas nuevas se vieran resaltadas "a la mitad".
+    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
       fila.getCell(col).fill = AMARILLO_RESALTADO;
     }
   }
