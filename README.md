@@ -282,6 +282,114 @@ Un estado de cuenta tiene una sola hoja, así que no hay forma de confundirlos. 
 
 Probado contra la carpeta real del 18/08 con las 4 cuentas más ruido (un `.txt`, un temporal de Excel y una segunda planilla más vieja): identifica correctamente la planilla, las 4 cuentas, ignora el resto y avisa del archivo abierto.
 
+## Registro de procesados: `src/registroProcesados.ts`
+
+Dentro de cada carpeta del día queda un `.bancosflow.json` con qué estados de cuenta se procesaron, cuándo y con qué resultado.
+
+Se eligió un archivo de control aparte en vez de renombrar los originales (agregarles `.procesado`) por dos motivos: son archivos que subió una persona y modificarlos es intrusivo, y sobre un montaje SMB un rename puede fallar si alguien tiene el archivo abierto.
+
+Se guarda el **SHA-256** de cada archivo, no sólo el nombre: si alguien vuelve a subir un estado de cuenta corregido con el mismo nombre, el hash cambia y se reprocesa en vez de darlo por hecho. Verificado en pruebas.
+
+> Esto evita trabajo repetido, pero **no** es la protección contra duplicados. Esa sigue siendo la deduplicación por fecha+tipo+monto, que funciona aunque el registro se borre. Por eso, si el JSON está corrupto o ilegible, el proceso avisa y sigue con un registro vacío en vez de frenarse.
+
+```bash
+node dist/registroProcesados.js <ruta del .bancosflow.json>   # ver el contenido
+```
+
+## Respaldo: `src/respaldo.ts`
+
+Antes de escribir la planilla se guarda una copia en `rutaBackups` con fecha y hora, y se purgan las que superan `retencionBackupsDias` (90 por defecto).
+
+Dos decisiones:
+
+- **Sólo se respalda la planilla.** Es lo único que el proceso modifica y lo único irreemplazable; los estados de cuenta quedan en el fileserver y se pueden volver a bajar del banco.
+- **Los respaldos van al disco local de la VM, no al fileserver.** Si el problema fuera justamente el montaje de red o algo que corrompa esa carpeta, tener la copia en el mismo lugar no serviría.
+
+```bash
+node dist/respaldo.js purgar [--simular]
+node dist/respaldo.js copiar <planilla> [--simular]
+```
+
+## Orquestador: `src/procesarCarpetaDelDia.ts`
+
+```bash
+node dist/procesarCarpetaDelDia.js [--dry-run] [--fecha yyyy-mm-dd] [--crear-carpetas]
+```
+
+Secuencia: ubica la carpeta y la planilla → clasifica → descarta lo ya procesado → respalda → corre `actualizarDesdeUltimaFecha` por cada estado de cuenta pendiente → anota en el registro y purga respaldos viejos.
+
+**`--dry-run` informa exactamente qué haría sin escribir nada.** Para poder decir cuántos movimientos entrarían, procesa contra una copia temporal de la planilla que después borra. Conviene correr así los primeros días.
+
+Situaciones en las que **no** procesa, y por qué:
+
+| Motivo | Comportamiento |
+|---|---|
+| Existe un archivo `PAUSADO` en la carpeta base | Freno de mano: no toca nada |
+| La carpeta del día no existe todavía | Espera |
+| Hay un `~$...` (Excel abierto) | Espera al próximo ciclo, para no escribir mientras alguien tiene el archivo abierto |
+| Todavía no se subió la planilla | Espera: procesar contra la planilla equivocada es peor que no procesar |
+| No hay estados de cuenta | Espera |
+| Todos los estados de cuenta ya se procesaron | No hace nada |
+
+Si un estado de cuenta falla, se anota el error y **se sigue con los demás**. Como no queda registrado como procesado, se reintenta solo en el próximo ciclo.
+
+## Poller: `src/poller.ts`
+
+```bash
+node dist/poller.js               # modo servicio, no termina
+node dist/poller.js --ciclos 3    # para probar a mano
+```
+
+**Por qué polling y no `inotify`:** `inotify` no funciona sobre montajes CIFS/SMB — el kernel no recibe eventos de escrituras hechas desde otra máquina. La opción "elegante" no está disponible en este escenario. A un ciclo por minuto el costo es despreciable.
+
+**Cómo evita procesar a medias:** toma una huella de la carpeta (nombres + tamaños + fechas). Si cambió respecto del ciclo anterior, anota el momento y no procesa. Recién cuando pasaron `esperaSinCambiosSegundos` sin ningún cambio, procesa. Eso da tiempo a subir todos los archivos y evita agarrar uno a medio copiar por la red.
+
+Probado simulando una subida progresiva (planilla, después un estado de cuenta, después otro): detectó cada cambio, esperó a que se aquietara y procesó **una sola vez** con todo junto. Un archivo que llega más tarde se procesa solo, sin repetir los anteriores.
+
+Otros detalles: al cambiar de día reinicia el seguimiento y crea la carpeta si falta (así se recupera aunque el timer de las 00:00 no haya corrido), y un error puntual —por ejemplo el montaje caído un momento— se registra y se reintenta en el próximo ciclo, sin tirar abajo el servicio.
+
+## Instalación en la VM
+
+```bash
+sudo mkdir -p /opt/bancosflow && cd /opt/bancosflow
+sudo git clone https://github.com/Zara-Zugarramurdi/BancosFlow.git .
+sudo npm install && sudo npx tsc
+sudo mkdir -p config && sudo nano config/bancosflow.config.json   # ver más abajo
+sudo mkdir -p /home/teledata/backups
+sudo chown -R teledata:teledata /opt/bancosflow /home/teledata/backups
+
+sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bancosflow-carpetas.timer
+sudo systemctl enable --now bancosflow-poller.service
+```
+
+Config mínima de producción (el resto toma los valores por defecto):
+
+```json
+{
+  "rutaCarpetaBase": "/media/windowsshare/contable/privado/ADMINISTRACION/PlanillaBancos",
+  "rutaBackups": "/home/teledata/backups"
+}
+```
+
+**Antes de habilitar el servicio** conviene correr unos días a mano con `--dry-run` y revisar que decida bien.
+
+Si el share se monta con una unidad de systemd, descomentar las líneas `Requires=` / `After=` en `bancosflow-poller.service` con el nombre correcto de esa unidad, para que el poller no arranque antes de que el montaje esté disponible.
+
+### Control del poller
+
+```bash
+sudo systemctl stop bancosflow-poller       # pausar
+sudo systemctl start bancosflow-poller      # reanudar
+sudo systemctl restart bancosflow-poller    # tras cambiar la configuración
+systemctl status bancosflow-poller          # estado
+journalctl -u bancosflow-poller -f          # log en vivo
+journalctl -u bancosflow-poller --since today
+```
+
+Además hay un **freno de mano sin acceso a la VM**: si se crea un archivo llamado `PAUSADO` en la carpeta base del share, el proceso no toca nada. Sirve para que Administración pueda frenarlo, por ejemplo mientras reorganiza la planilla a mano. Se reanuda borrando el archivo.
+
 ## Siguientes pasos sugeridos
 
 1. **Detección de "ayer"**: al llamar `procesarEstadoDeCuenta` / `actualizarPlanilla`, calculen la fecha objetivo como "ayer hábil" (cuidado con fines de semana/feriados: viernes → el lunes hay que traer 3 días si el banco no generó movimiento sábado/domingo, pero igual filtrando por fecha esto no debería romper nada, solo devolvería 0 movimientos si no hubo actividad).

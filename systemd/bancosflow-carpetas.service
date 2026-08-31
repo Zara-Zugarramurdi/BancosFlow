@@ -1,0 +1,11 @@
+[Unit]
+Description=BancosFlow - creacion de las carpetas del dia
+Documentation=https://github.com/Zara-Zugarramurdi/BancosFlow
+
+[Service]
+Type=oneshot
+User=teledata
+WorkingDirectory=/opt/bancosflow
+Environment=BANCOSFLOW_CONFIG=/opt/bancosflow/config/bancosflow.config.json
+ExecStart=/usr/bin/node /opt/bancosflow/dist/rutasPlanillaBancos.js
+NoNewPrivileges=true

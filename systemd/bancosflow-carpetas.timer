@@ -1,0 +1,11 @@
+[Unit]
+Description=BancosFlow - crear las carpetas del dia a las 00:00
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+# Si la VM estuvo apagada a esa hora, se ejecuta al arrancar.
+Persistent=true
+Unit=bancosflow-carpetas.service
+
+[Install]
+WantedBy=timers.target

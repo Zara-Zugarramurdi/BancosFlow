@@ -1,0 +1,27 @@
+[Unit]
+Description=BancosFlow - poller de la carpeta del dia
+Documentation=https://github.com/Zara-Zugarramurdi/BancosFlow
+# El proceso necesita el share montado; si es un montaje de systemd, descomentar
+# y ajustar el nombre de la unidad correspondiente:
+# Requires=media-windowsshare.mount
+# After=media-windowsshare.mount
+After=network-online.target
+
+[Service]
+Type=simple
+User=teledata
+WorkingDirectory=/opt/bancosflow
+Environment=NODE_ENV=production
+Environment=BANCOSFLOW_CONFIG=/opt/bancosflow/config/bancosflow.config.json
+ExecStart=/usr/bin/node /opt/bancosflow/dist/poller.js
+
+# Si el proceso muere por cualquier motivo, systemd lo vuelve a levantar.
+Restart=always
+RestartSec=30
+
+# El poller no necesita permisos especiales ni escribir fuera de sus rutas.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
