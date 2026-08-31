@@ -4,8 +4,8 @@ Documentation=https://github.com/Zara-Zugarramurdi/BancosFlow
 
 [Service]
 Type=oneshot
-User=teledata
-WorkingDirectory=/opt/bancosflow
-Environment=BANCOSFLOW_CONFIG=/opt/bancosflow/config/bancosflow.config.json
-ExecStart=/usr/bin/node /opt/bancosflow/dist/rutasPlanillaBancos.js
+User=root
+WorkingDirectory=/home/teledata/BancosFlow
+Environment=BANCOSFLOW_CONFIG=/home/teledata/BancosFlow/config/bancosflow.config.json
+ExecStart=/usr/bin/node /home/teledata/BancosFlow/dist/rutasPlanillaBancos.js
 NoNewPrivileges=true

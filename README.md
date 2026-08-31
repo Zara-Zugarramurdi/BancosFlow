@@ -350,18 +350,24 @@ Otros detalles: al cambiar de día reinicia el seguimiento y crea la carpeta si 
 
 ## Instalación en la VM
 
-```bash
-sudo mkdir -p /opt/bancosflow && cd /opt/bancosflow
-sudo git clone https://github.com/Zara-Zugarramurdi/BancosFlow.git .
-sudo npm install && sudo npx tsc
-sudo mkdir -p config && sudo nano config/bancosflow.config.json   # ver más abajo
-sudo mkdir -p /home/teledata/backups
-sudo chown -R teledata:teledata /opt/bancosflow /home/teledata/backups
+Las unidades de systemd vienen configuradas para la instalación actual:
 
-sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bancosflow-carpetas.timer
-sudo systemctl enable --now bancosflow-poller.service
+| Dato | Valor |
+|---|---|
+| Ruta del proyecto | `/home/teledata/BancosFlow` |
+| Usuario | `root` |
+| Respaldos | `/home/teledata/backups` |
+
+Si se instala en otra ruta o con otro usuario, hay que editar en **ambas** unidades: `User`, `WorkingDirectory`, el `Environment=BANCOSFLOW_CONFIG` y el `ExecStart`.
+
+```bash
+cd /home/teledata
+git clone https://github.com/Zara-Zugarramurdi/BancosFlow.git
+cd BancosFlow
+npm install
+npx tsc                      # genera dist/, que no está en el repo
+mkdir -p config /home/teledata/backups
+nano config/bancosflow.config.json     # ver abajo
 ```
 
 Config mínima de producción (el resto toma los valores por defecto):
@@ -373,9 +379,62 @@ Config mínima de producción (el resto toma los valores por defecto):
 }
 ```
 
-**Antes de habilitar el servicio** conviene correr unos días a mano con `--dry-run` y revisar que decida bien.
+Antes de instalar los servicios, verificar a mano que todo resuelva bien:
+
+```bash
+node dist/config.js                            # ¿lee la config correcta?
+node dist/rutasPlanillaBancos.js --simular     # ¿qué carpetas crearía?
+node dist/procesarCarpetaDelDia.js --dry-run   # ¿qué haría? no escribe nada
+```
+
+Recién cuando eso funcione:
+
+```bash
+sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bancosflow-carpetas.timer
+sudo systemctl enable --now bancosflow-poller.service
+```
 
 Si el share se monta con una unidad de systemd, descomentar las líneas `Requires=` / `After=` en `bancosflow-poller.service` con el nombre correcto de esa unidad, para que el poller no arranque antes de que el montaje esté disponible.
+
+### Actualizar a una versión nueva
+
+```bash
+cd /home/teledata/BancosFlow
+sudo systemctl stop bancosflow-poller     # evita que corra a mitad de la actualización
+git pull
+npm install                               # sólo si cambiaron las dependencias
+npx tsc                                   # SIEMPRE: dist/ no viene en el repo
+
+# Si cambiaron los archivos de systemd/:
+sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+
+sudo systemctl start bancosflow-poller
+systemctl status bancosflow-poller
+```
+
+El paso que más se olvida es `npx tsc`: el repo versiona el código TypeScript, no el compilado, así que sin ese paso el servicio sigue corriendo la versión anterior sin dar ningún error.
+
+### Diagnóstico de arranque
+
+Si el servicio no levanta, `systemctl status bancosflow-poller` suele alcanzar. Códigos frecuentes:
+
+| Síntoma | Causa |
+|---|---|
+| `status=200/CHDIR` | El `WorkingDirectory` no existe o el usuario no puede entrar. |
+| `Cannot find module .../dist/poller.js` | Falta compilar: `npx tsc`. |
+| `status=217/USER` | El usuario del `User=` no existe en la VM. |
+| Arranca y falla al procesar | Suele ser la config: correr `node dist/config.js` y revisar rutas. |
+
+Conviene probar primero con el mismo usuario del servicio antes de insistir con systemd:
+
+```bash
+sudo -u root /usr/bin/node /home/teledata/BancosFlow/dist/poller.js --ciclos 1
+```
+
+Mientras se depura, tener el servicio parado (`systemctl stop`): con `Restart=always` reintenta cada 30 segundos y llena el journal.
 
 ### Control del poller
 
