@@ -215,6 +215,73 @@ Si el movimiento más antiguo del estado de cuenta es posterior a la última fec
 
 Si la fila ancla tuviera una fecha mal tipeada **hacia atrás** (ej. enero en vez de julio), el proceso re-escanearía desde esa fecha y podría insertar movimientos viejos al final del ledger, fuera de orden cronológico. No se bloquea porque en el ledger real hay varios saltos hacia atrás legítimos y el chequeo saltaría en falso constantemente. Los typos hacia adelante, que son los peligrosos porque harían saltear meses de movimientos, sí están cubiertos.
 
+# Automatización en el servidor (proceso desatendido)
+
+Además de los comandos que se corren a mano, el proyecto incluye las piezas para que el proceso corra solo en la VM, leyendo la carpeta compartida donde Administración deja los archivos.
+
+> **Estado:** en construcción. Esta sección se va completando a medida que se implementa cada pieza.
+
+## Configuración: `src/config.ts`
+
+Todos los parámetros ajustables viven en un solo lugar. Los valores por defecto están en el código y se pisan con un archivo JSON, sin recompilar nada: por defecto `config/bancosflow.config.json`, o donde apunte la variable de entorno `BANCOSFLOW_CONFIG`. Sólo hace falta escribir las claves que se quieran cambiar.
+
+| Parámetro | Por defecto | Qué controla |
+|---|---|---|
+| `rutaCarpetaBase` | `/media/windowsshare/.../PlanillaBancos` | Carpeta raíz sobre la que trabaja el proceso. Es la única que se toca. |
+| `ubicacionPlanilla` | `carpetaDelDia` | De dónde sale la planilla: la carpeta del día, o `maestraFija`. |
+| `rutaPlanillaMaestra` | `""` | Ruta de la planilla única. Sólo se usa con `maestraFija`. |
+| `rutaBackups` | `/home/teledata/backups` | Dónde se guardan los respaldos: disco local de la VM, **no** el fileserver. |
+| `retencionBackupsDias` | `90` | Días que se conservan los respaldos. |
+| `intervaloPollSegundos` | `60` | Cada cuánto se revisa si cambió algo. |
+| `esperaSinCambiosSegundos` | `60` | Cuánto tiene que estar quieta la carpeta antes de procesar. |
+| `horaCreacionCarpetas` | `00:00` | A qué hora se crean las carpetas del día. |
+| `zonaHoraria` | `America/Montevideo` | Con qué zona se decide "qué día es hoy". |
+| `nombresMeses` | Enero…Diciembre | Nombres de las carpetas de mes. |
+| `diaConCeroAdelante` | `false` | Si el día va como `9` o como `09`. |
+| `nombreArchivoRegistro` | `.bancosflow.json` | Archivo de control dentro de cada carpeta del día. |
+
+Correr `node dist/config.js` imprime la configuración efectiva; sirve para verificar en la VM que el archivo JSON se está leyendo. Las claves desconocidas se avisan por consola en vez de ignorarse en silencio, porque casi siempre son errores de tipeo que dejarían el proceso corriendo con el valor por defecto.
+
+### Sobre `ubicacionPlanilla`
+
+Las carpetas por día se crean **siempre**, en los dos modos, porque los estados de cuenta se suben por día de todas formas. Lo único que cambia es de dónde sale la planilla: hoy la sube Administración a la carpeta del día (`carpetaDelDia`); si mañana se prefiere una única planilla en un lugar fijo, se cambia esa clave y se completa `rutaPlanillaMaestra`, sin tocar código.
+
+## Estructura de carpetas: `src/rutasPlanillaBancos.ts`
+
+```
+<rutaCarpetaBase>/<año>/<Mes>/<día>     ej: .../PlanillaBancos/2026/Agosto/19
+```
+
+```bash
+node dist/rutasPlanillaBancos.js [--simular] [--fecha yyyy-mm-dd]
+```
+
+Es idempotente: si las carpetas ya existen no hace nada. Con `--simular` informa qué crearía sin tocar el disco. Pensado para correr todos los días a las 00:00.
+
+**Por qué la zona horaria importa.** El día se calcula con `Intl` en la zona configurada, no con los métodos locales de `Date`. Si la VM está en UTC y no se fija esto, entre las 21:00 y la medianoche de Uruguay el proceso ya estaría usando la carpeta del día siguiente. Verificado: el instante `2026-08-20T02:30:00Z` da día **19** con `America/Montevideo` y día **20** con `UTC`.
+
+## Clasificación de archivos: `src/clasificarArchivos.ts`
+
+```bash
+node dist/clasificarArchivos.js <carpeta>
+```
+
+Decide qué es cada archivo **por contenido, nunca por nombre** — los nombres reales varían todo el tiempo (`Copia de Planilla BANCOS desde 12-22 18-08.xlsx`, `Detalle_Movimiento_Cuenta (7).xls`) y depender de ellos sería frágil.
+
+El orden de las decisiones es deliberado:
+
+1. Se descarta lo que no es Excel, el archivo de control y los temporales de Excel (`~$...`).
+2. Se intenta identificar la cuenta con `accountIdentifier`. Si funciona, es un estado de cuenta.
+3. Si no, se mira si el libro tiene **las 5 hojas** del ledger (`BROU $`, `BROU U$S`, `BROU EUROS`, `SANTANDER $`, `SANTANDER U$S`). Si las tiene, es la planilla.
+
+Un estado de cuenta tiene una sola hoja, así que no hay forma de confundirlos. Para mirar las hojas se usa `bookSheets`, que lee sólo la lista de nombres en vez de parsear el libro entero.
+
+**Archivos abiertos en Excel.** La presencia de un `~$...` indica que alguien tiene el libro abierto; la clasificación lo reporta con `hayArchivosAbiertos` para que el orquestador postergue el procesamiento hasta el próximo ciclo, en vez de arriesgarse a que la persona guarde encima de lo insertado.
+
+**Planillas duplicadas.** Si hay más de una planilla en la carpeta, gana la de fecha de modificación más reciente y las otras quedan listadas en `planillasDuplicadas` para descartarlas.
+
+Probado contra la carpeta real del 18/08 con las 4 cuentas más ruido (un `.txt`, un temporal de Excel y una segunda planilla más vieja): identifica correctamente la planilla, las 4 cuentas, ignora el resto y avisa del archivo abierto.
+
 ## Siguientes pasos sugeridos
 
 1. **Detección de "ayer"**: al llamar `procesarEstadoDeCuenta` / `actualizarPlanilla`, calculen la fecha objetivo como "ayer hábil" (cuidado con fines de semana/feriados: viernes → el lunes hay que traer 3 días si el banco no generó movimiento sábado/domingo, pero igual filtrando por fecha esto no debería romper nada, solo devolvería 0 movimientos si no hubo actividad).
