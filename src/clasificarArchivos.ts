@@ -54,13 +54,26 @@ export interface Clasificacion {
   planillasDuplicadas: ArchivoPlanilla[];
   estadosDeCuenta: ArchivoEstadoDeCuenta[];
   ignorados: ArchivoIgnorado[];
-  /** Si hay algún archivo temporal de Excel (`~$...`), indicando que alguien lo tiene abierto. */
+  /** Si hay algún archivo de bloqueo, indicando que alguien tiene un libro abierto. */
   hayArchivosAbiertos: boolean;
 }
 
-/** ¿Es un archivo temporal de Excel? Aparecen mientras alguien tiene el libro abierto. */
-function esTemporalDeExcel(nombre: string): boolean {
-  return nombre.startsWith("~$");
+/**
+ * ¿Es un archivo de bloqueo, de los que aparecen mientras alguien tiene el libro abierto?
+ *
+ * Hay dos formatos según el programa, y hay que cubrir los dos:
+ *   - Excel:       `~$nombre.xlsx`
+ *   - LibreOffice: `.~lock.nombre.xlsx#`
+ *
+ * El de LibreOffice apareció en la carpeta real de producción: en esa VM la planilla se
+ * abre con LibreOffice, no con Excel. Antes se detectaba sólo el de Excel, así que el
+ * archivo de LibreOffice caía en "no es un Excel" y el proceso escribía igual sobre una
+ * planilla abierta — con el riesgo de que la persona guardara encima de lo insertado.
+ */
+function esArchivoDeBloqueo(nombre: string): boolean {
+  if (nombre.startsWith("~$")) return true;                          // Excel
+  if (nombre.startsWith(".~lock.") && nombre.endsWith("#")) return true; // LibreOffice
+  return false;
 }
 
 /** ¿Tiene el archivo las hojas que caracterizan a la planilla de bancos? */
@@ -110,9 +123,9 @@ export function clasificarCarpeta(rutaCarpeta: string, configExplicita?: Config)
       continue;
     }
 
-    if (esTemporalDeExcel(nombre)) {
+    if (esArchivoDeBloqueo(nombre)) {
       hayArchivosAbiertos = true;
-      ignorados.push({ ruta, nombre, motivo: "temporal de Excel (archivo abierto)" });
+      ignorados.push({ ruta, nombre, motivo: "archivo de bloqueo: alguien tiene el libro abierto" });
       continue;
     }
     if (nombre === config.nombreArchivoRegistro) {
@@ -177,7 +190,7 @@ if (require.main === module) {
       c.ignorados.forEach((i) => console.log(`   ${i.nombre}  -> ${i.motivo}`));
     }
     if (c.hayArchivosAbiertos) {
-      console.log("\nAVISO: hay archivos abiertos en Excel; conviene esperar antes de procesar.");
+      console.log("\nAVISO: alguien tiene un libro abierto; conviene esperar antes de procesar.");
     }
   } catch (err) {
     console.error("ERROR:", (err as Error).message);

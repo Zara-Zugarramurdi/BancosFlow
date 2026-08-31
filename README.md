@@ -276,7 +276,16 @@ El orden de las decisiones es deliberado:
 
 Un estado de cuenta tiene una sola hoja, así que no hay forma de confundirlos. Para mirar las hojas se usa `bookSheets`, que lee sólo la lista de nombres en vez de parsear el libro entero.
 
-**Archivos abiertos en Excel.** La presencia de un `~$...` indica que alguien tiene el libro abierto; la clasificación lo reporta con `hayArchivosAbiertos` para que el orquestador postergue el procesamiento hasta el próximo ciclo, en vez de arriesgarse a que la persona guarde encima de lo insertado.
+**Libros abiertos.** Se detectan los dos formatos de archivo de bloqueo, porque según el programa cambia:
+
+| Programa | Archivo de bloqueo |
+|---|---|
+| Excel | `~$nombre.xlsx` |
+| LibreOffice | `.~lock.nombre.xlsx#` |
+
+Cuando aparece cualquiera de los dos, la clasificación lo reporta con `hayArchivosAbiertos` y el orquestador **posterga el procesamiento** hasta el próximo ciclo, en vez de arriesgarse a que la persona guarde encima de lo insertado.
+
+El formato de LibreOffice se agregó después de verlo en la carpeta real de producción: en esa VM la planilla se abre con LibreOffice, no con Excel, y al detectarse sólo el formato de Excel el archivo caía en "no es un Excel" y el proceso escribía igual sobre una planilla abierta.
 
 **Planillas duplicadas.** Si hay más de una planilla en la carpeta, gana la de fecha de modificación más reciente y las otras quedan listadas en `planillasDuplicadas` para descartarlas.
 

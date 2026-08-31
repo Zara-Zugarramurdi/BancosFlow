@@ -108,8 +108,9 @@ export async function procesarCarpetaDelDia(
 
   const clasificacion = clasificarCarpeta(rutas.rutaDia, config);
 
-  // Si alguien tiene un Excel abierto, esperamos al próximo ciclo: escribir la planilla
-  // mientras está abierta puede terminar en que la persona guarde encima de lo insertado.
+  // Si alguien tiene el libro abierto (Excel o LibreOffice), esperamos al próximo ciclo:
+  // escribir la planilla mientras está abierta puede terminar en que la persona guarde
+  // encima de lo que insertamos.
   if (clasificacion.hayArchivosAbiertos) {
     return { ...base, motivo: "archivos-abiertos" };
   }
@@ -230,7 +231,7 @@ export async function procesarCarpetaDelDia(
 const EXPLICACION_MOTIVOS: Record<MotivoNoProcesado, string> = {
   pausado: `hay un archivo "${NOMBRE_ARCHIVO_PAUSA}" en la carpeta base: el proceso está frenado a propósito`,
   "carpeta-inexistente": "la carpeta del día todavía no existe",
-  "archivos-abiertos": "hay un archivo abierto en Excel; se espera al próximo ciclo",
+  "archivos-abiertos": "alguien tiene un libro abierto (Excel o LibreOffice); se espera al próximo ciclo",
   "sin-planilla": "todavía no se subió la planilla de bancos; se espera",
   "sin-estados-de-cuenta": "todavía no se subió ningún estado de cuenta",
   "todo-procesado": "todos los estados de cuenta de la carpeta ya estaban procesados",
