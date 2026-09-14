@@ -25,23 +25,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { cargarConfig, Config } from "./config";
 import { calcularRutasDelDia, crearCarpetasDelDia } from "./rutasPlanillaBancos";
+import { huellaDelDia } from "./almacenamiento";
 import { procesarCarpetaDelDia, imprimirResultado } from "./procesarCarpetaDelDia";
-
-/** Huella del contenido de una carpeta: cambia si se agrega, borra o modifica algo. */
-function huellaDeCarpeta(rutaCarpeta: string, config: Config): string {
-  if (!fs.existsSync(rutaCarpeta)) return "(no existe)";
-  const partes: string[] = [];
-  for (const nombre of fs.readdirSync(rutaCarpeta).sort()) {
-    if (nombre === config.nombreArchivoRegistro) continue; // lo escribimos nosotros
-    try {
-      const s = fs.statSync(path.join(rutaCarpeta, nombre));
-      partes.push(`${nombre}:${s.size}:${Math.floor(s.mtimeMs)}`);
-    } catch {
-      partes.push(`${nombre}:?`);
-    }
-  }
-  return partes.join("|");
-}
 
 function ahoraTexto(): string {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -78,7 +63,10 @@ export async function correrPoller(opciones: { config?: Config; ciclos?: number 
         fechaCarpetaActual = rutas.fecha;
         huellaAnterior = null;
         momentoUltimoCambio = null;
-        const creacion = crearCarpetasDelDia(new Date(), { config });
+        const creacion =
+          config.modoAcceso === "sistemaArchivos"
+            ? crearCarpetasDelDia(new Date(), { config })
+            : { creadas: [] as string[] };
         if (creacion.creadas.length > 0) {
           log(`Día ${rutas.fecha}: carpetas creadas -> ${rutas.rutaDia}`);
         } else {
@@ -86,7 +74,7 @@ export async function correrPoller(opciones: { config?: Config; ciclos?: number 
         }
       }
 
-      const huella = huellaDeCarpeta(rutas.rutaDia, config);
+      const huella = await huellaDelDia(new Date(), { config });
 
       if (huellaAnterior === null) {
         huellaAnterior = huella;

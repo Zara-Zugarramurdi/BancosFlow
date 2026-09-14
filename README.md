@@ -357,6 +357,57 @@ Probado simulando una subida progresiva (planilla, después un estado de cuenta,
 
 Otros detalles: al cambiar de día reinicia el seguimiento y crea la carpeta si falta (así se recupera aunque el timer de las 00:00 no haya corrido), y un error puntual —por ejemplo el montaje caído un momento— se registra y se reintenta en el próximo ciclo, sin tirar abajo el servicio.
 
+## Acceso a SharePoint: por qué NO se usa `rclone mount`
+
+Al migrar del fileserver a SharePoint se probó primero con un montaje FUSE (`rclone mount`), porque permitía dejar el resto del código sin cambios. **No funciona**, y el modo en que falla es peor que el fallo en sí.
+
+**La causa:** SharePoint retoca los archivos de Office al recibirlos. Se suben 1.200.869 bytes y del otro lado quedan 1.208.496 — y en el intento siguiente, 1.208.499. Distinto cada vez, porque agrega metadatos propios. rclone compara el tamaño de origen y destino, no coinciden, concluye `corrupted on transfer` y **borra lo que acababa de subir**.
+
+Se verificó que un archivo binario de 1 MB sube sin problema y que el mismo `.xlsx` falla siempre: no es el tamaño ni la sesión multiparte, es el retoque a los archivos de Office.
+
+**Por qué es tan grave con montaje:** todo eso ocurre de forma asincrónica, fuera de nuestro proceso. El proceso escribía la planilla, veía éxito, guardaba el respaldo, anotaba el registro — y la planilla nunca llegaba a SharePoint. Sin mirar los logs de rclone, nadie se enteraba. Un proceso que dice haber terminado bien un trabajo que no hizo es peor que uno que falla.
+
+**La solución:** `modoAcceso: "rclone"`. No se monta nada. Se baja con `rclone copy`, se procesa en disco local, y se sube con `rclone copy --ignore-size --ignore-checksum`, verificando después que el archivo esté en el destino. Si algo falla, **falla nuestro proceso**: sale por el log del servicio y el registro no se escribe, así que el próximo ciclo reintenta.
+
+### Configuración para SharePoint
+
+```json
+{
+  "modoAcceso": "rclone",
+  "ubicacionPlanilla": "maestraFija",
+  "ubicacionRegistro": "local",
+  "remotoRclone": "sharepoint:",
+  "rutaRemotaBase": "contable/privado/ADMINISTRACION/PlanillaBancos",
+  "rutaRemotaPlanillaMaestra": "contable/privado/ADMINISTRACION/PlanillaBancos/PlanillaBancos.xlsx",
+  "rutaTrabajoLocal": "/home/teledata/bancosflow-trabajo",
+  "rutaBackups": "/home/teledata/backups"
+}
+```
+
+`flagsRcloneSubida` vale `["--ignore-size", "--ignore-checksum"]` por defecto y **no conviene cambiarlo**: sin esos flags, rclone borra la planilla del destino al considerarla corrupta.
+
+Verificación rápida antes de procesar:
+
+```bash
+node dist/rclone.js verificar    # ¿responde el remoto?
+node dist/rclone.js listar       # ¿se ve la carpeta base?
+```
+
+### Piezas nuevas
+
+- **`src/rclone.ts`** — envoltorio del binario `rclone` (listar, crear carpeta, bajar, subir con verificación, borrar).
+- **`src/almacenamiento.ts`** — aísla *de dónde salen* los archivos. El resto del código sigue trabajando sobre rutas locales comunes y no se entera de si vienen de un montaje o de una descarga.
+
+El modo histórico sigue disponible con `modoAcceso: "sistemaArchivos"`, que es el valor por defecto. Verificado que da resultados idénticos a antes del cambio.
+
+### El registro pasa a disco local
+
+Con `ubicacionRegistro: "local"` (por defecto), el `.bancosflow.json` se guarda en `rutaTrabajoLocal/registros/<fecha>.json` en vez de en la carpeta del día. Saca una escritura del remoto y elimina el `rename` sobre archivo existente, que es la operación más frágil sobre montajes de red. Administración no necesita verlo, y la protección real contra duplicados sigue siendo la deduplicación por fecha+tipo+monto.
+
+### Orden de las operaciones
+
+La planilla **se publica antes de anotar el registro**. Si la subida falla, el registro no se escribe y el próximo ciclo reintenta. Al revés quedaría anotado como hecho algo que nunca llegó al destino.
+
 ## Instalación en la VM
 
 Las unidades de systemd vienen configuradas para la instalación actual:

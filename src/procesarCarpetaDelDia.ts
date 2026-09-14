@@ -17,7 +17,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { cargarConfig, Config } from "./config";
-import { calcularRutasDelDia, crearCarpetasDelDia } from "./rutasPlanillaBancos";
+import { crearCarpetasDelDia } from "./rutasPlanillaBancos";
+import {
+  prepararEspacioDeTrabajo,
+  publicarPlanilla,
+  publicarRegistro,
+  borrarPlanillaDuplicada,
+  carpetaTemporal,
+} from "./almacenamiento";
 import { clasificarCarpeta, Clasificacion } from "./clasificarArchivos";
 import {
   leerRegistro,
@@ -50,6 +57,13 @@ export interface ResultadoCuenta {
   error?: string;
 }
 
+export interface ResultadoPublicacionCarpeta {
+  publicado: boolean;
+  destino?: string;
+  tamanioLocal?: number;
+  tamanioRemoto?: number;
+}
+
 export interface ResultadoCarpeta {
   fecha: string;
   rutaDia: string;
@@ -58,6 +72,7 @@ export interface ResultadoCarpeta {
   planilla?: string;
   resultados: ResultadoCuenta[];
   rutaRespaldo?: string;
+  publicacion?: ResultadoPublicacionCarpeta;
   simulado: boolean;
 }
 
@@ -69,9 +84,14 @@ function hayPausa(config: Config): boolean {
  * Ubica la planilla a usar, según la configuración.
  * En modo `maestraFija` no se busca en la carpeta del día: se usa siempre la misma.
  */
-function ubicarPlanilla(config: Config, clasificacion: Clasificacion): string | null {
+function ubicarPlanilla(
+  config: Config,
+  clasificacion: Clasificacion,
+  planillaDelEspacio: string | null
+): string | null {
   if (config.ubicacionPlanilla === "maestraFija") {
-    return fs.existsSync(config.rutaPlanillaMaestra) ? config.rutaPlanillaMaestra : null;
+    // La resuelve `prepararEspacioDeTrabajo`: en modo rclone ya viene descargada.
+    return planillaDelEspacio;
   }
   return clasificacion.planilla ? clasificacion.planilla.ruta : null;
 }
@@ -87,7 +107,8 @@ export async function procesarCarpetaDelDia(
   const simular = opciones.simular ?? false;
   const fecha = opciones.fecha ?? new Date();
 
-  const rutas = calcularRutasDelDia(fecha, config);
+  const espacio = await prepararEspacioDeTrabajo(fecha, { config, simular });
+  const rutas = espacio.rutas;
   const base: ResultadoCarpeta = {
     fecha: rutas.fecha,
     rutaDia: rutas.rutaDia,
@@ -102,11 +123,11 @@ export async function procesarCarpetaDelDia(
     return { ...base, motivo: "pausado" };
   }
 
-  if (!fs.existsSync(rutas.rutaDia)) {
+  if (!fs.existsSync(espacio.carpetaLocalDelDia)) {
     return { ...base, motivo: "carpeta-inexistente" };
   }
 
-  const clasificacion = clasificarCarpeta(rutas.rutaDia, config);
+  const clasificacion = clasificarCarpeta(espacio.carpetaLocalDelDia, config);
 
   // Si alguien tiene el libro abierto (Excel o LibreOffice), esperamos al próximo ciclo:
   // escribir la planilla mientras está abierta puede terminar en que la persona guarde
@@ -119,14 +140,14 @@ export async function procesarCarpetaDelDia(
     return { ...base, motivo: "sin-estados-de-cuenta" };
   }
 
-  const rutaPlanilla = ubicarPlanilla(config, clasificacion);
+  const rutaPlanilla = ubicarPlanilla(config, clasificacion, espacio.planillaLocal);
   if (!rutaPlanilla) {
     // Se espera: procesar contra la planilla equivocada es peor que no procesar.
     return { ...base, motivo: "sin-planilla" };
   }
 
   // Filtrar lo que ya se procesó, comparando por contenido y no sólo por nombre.
-  const registro = leerRegistro(rutas.rutaRegistro, rutas.fecha);
+  const registro = leerRegistro(espacio.rutaRegistro, rutas.fecha);
   const pendientes = clasificacion.estadosDeCuenta
     .map((e) => ({ ...e, hash: hashDeArchivo(e.ruta) }))
     .filter((e) => !yaProcesado(registro, e.nombre, e.hash));
@@ -140,7 +161,7 @@ export async function procesarCarpetaDelDia(
 
   // Descartar planillas viejas duplicadas, si las hubiera.
   for (const vieja of clasificacion.planillasDuplicadas) {
-    if (!simular) fs.unlinkSync(vieja.ruta);
+    await borrarPlanillaDuplicada(espacio, vieja.ruta, { config, simular });
   }
 
   const resultados: ResultadoCuenta[] = [];
@@ -150,10 +171,7 @@ export async function procesarCarpetaDelDia(
       if (simular) {
         // En simulación se procesa contra una copia temporal, así se puede informar
         // exactamente qué se agregaría sin tocar la planilla real.
-        const copia = path.join(
-          fs.mkdtempSync(path.join(require("os").tmpdir(), "bancosflow-")),
-          path.basename(rutaPlanilla)
-        );
+        const copia = path.join(carpetaTemporal(), path.basename(rutaPlanilla));
         fs.copyFileSync(rutaPlanilla, copia);
         const r = await actualizarDesdeUltimaFecha(copia, estado.ruta, copia);
         if (r.diasSinCobertura.length > 0) {
@@ -214,8 +232,24 @@ export async function procesarCarpetaDelDia(
     }
   }
 
+  // Publicar la planilla ANTES de anotar el registro: si la subida falla, el registro no
+  // se escribe y el próximo ciclo reintenta. Al revés quedaría anotado como hecho algo que
+  // nunca llegó al destino, que es exactamente el modo de falla que se quiere evitar.
+  let publicacion: ResultadoPublicacionCarpeta | undefined;
+  const huboCambios = resultados.some((r) => r.agregados > 0);
+  if (huboCambios) {
+    const p = await publicarPlanilla(espacio, rutaPlanilla, { config, simular });
+    publicacion = {
+      publicado: p.publicado,
+      destino: p.destino,
+      tamanioLocal: p.tamanioLocal,
+      tamanioRemoto: p.tamanioRemoto,
+    };
+  }
+
   if (!simular) {
-    guardarRegistro(rutas.rutaRegistro, registro);
+    guardarRegistro(espacio.rutaRegistro, registro);
+    await publicarRegistro(espacio, { config, simular });
     purgarRespaldosViejos({ config });
   }
 
@@ -225,6 +259,7 @@ export async function procesarCarpetaDelDia(
     planilla: path.basename(rutaPlanilla),
     resultados,
     rutaRespaldo: respaldo.rutaRespaldo,
+    publicacion,
   };
 }
 
@@ -266,6 +301,14 @@ export function imprimirResultado(r: ResultadoCarpeta): void {
     c.avisos.forEach((a) => console.log(`     AVISO: ${a}`));
   }
   console.log(`\nTotal agregado: ${totalAgregados} movimiento(s)${r.simulado ? " (simulado, no se escribió nada)" : ""}`);
+
+  if (r.publicacion?.publicado) {
+    console.log(
+      `Planilla publicada en ${r.publicacion.destino}` +
+        ` (local ${r.publicacion.tamanioLocal} bytes, remoto ${r.publicacion.tamanioRemoto} bytes)`
+    );
+    console.log("El tamaño remoto difiere del local porque SharePoint retoca los archivos de Office; es esperable.");
+  }
 }
 
 // --- Uso por consola:

@@ -17,6 +17,21 @@ import * as path from "path";
 
 export type UbicacionPlanilla = "carpetaDelDia" | "maestraFija";
 
+/**
+ * Cómo se llega a los archivos.
+ *
+ * - `sistemaArchivos`: la carpeta está montada (SMB del fileserver viejo, o `rclone mount`).
+ *   Se lee y escribe directamente sobre ella.
+ * - `rclone`: no hay nada montado. Se baja a una carpeta local de trabajo con `rclone copy`,
+ *   se procesa ahí, y se sube con `rclone copy` verificando que haya llegado.
+ *
+ * Se agregó `rclone` porque el montaje FUSE contra SharePoint resultó inviable: SharePoint
+ * retoca los archivos de Office al recibirlos, rclone lo interpreta como transferencia
+ * corrupta y borra lo subido — todo de forma asincrónica y silenciosa, así que el proceso
+ * reportaba éxito y la planilla nunca llegaba. Ver el comentario de `src/rclone.ts`.
+ */
+export type ModoAcceso = "sistemaArchivos" | "rclone";
+
 export interface Config {
   /** Carpeta raíz sobre la que trabaja el proceso. Es la única que se toca. */
   rutaCarpetaBase: string;
@@ -69,8 +84,55 @@ export interface Config {
   /** Si el día lleva cero adelante (`09`) o no (`9`). Acordado: sin cero. */
   diaConCeroAdelante: boolean;
 
-  /** Nombre del archivo de control dentro de cada carpeta del día. */
+  /** Nombre del archivo de control de archivos ya procesados. */
   nombreArchivoRegistro: string;
+
+  // --- Acceso a los archivos ---
+
+  /** Cómo se llega a los archivos: carpeta montada o rclone explícito. */
+  modoAcceso: ModoAcceso;
+
+  /**
+   * Dónde vive el registro de procesados.
+   *
+   * `local` lo guarda en `rutaTrabajoLocal/registros`, fuera del share. Es lo recomendado:
+   * saca una escritura del remoto y elimina el `rename` sobre archivo existente, que es la
+   * operación más frágil sobre montajes de red. Administración no necesita verlo.
+   */
+  ubicacionRegistro: "local" | "carpetaDelDia";
+
+  // --- Sólo para modoAcceso = "rclone" ---
+
+  /** Nombre del remoto configurado en rclone, con o sin los dos puntos. Ej: `sharepoint:` */
+  remotoRclone: string;
+
+  /** Ruta de la carpeta base DENTRO del remoto (sin el nombre del remoto). */
+  rutaRemotaBase: string;
+
+  /** Carpeta local donde se bajan los archivos para trabajar. Se limpia sola. */
+  rutaTrabajoLocal: string;
+
+  /** Ruta de la planilla maestra dentro del remoto. Sólo con `ubicacionPlanilla=maestraFija`. */
+  rutaRemotaPlanillaMaestra: string;
+
+  /** Binario de rclone. Se puede poner la ruta completa si no está en el PATH. */
+  rcloneBinario: string;
+
+  /** Flags para cualquier transferencia (bajada y subida). */
+  flagsRcloneTransferencia: string[];
+
+  /**
+   * Flags adicionales sólo para subir.
+   *
+   * `--ignore-size` y `--ignore-checksum` son **imprescindibles** con SharePoint: retoca los
+   * archivos de Office al recibirlos, así que el tamaño del destino nunca coincide con el del
+   * origen (verificado: 1.200.869 bytes se convierten en 1.208.496, y en el intento siguiente
+   * en 1.208.499). Sin estos flags rclone da `corrupted on transfer` y borra lo que subió.
+   */
+  flagsRcloneSubida: string[];
+
+  /** Tiempo máximo para un comando de rclone, en segundos. */
+  timeoutRcloneSegundos: number;
 }
 
 export const CONFIG_POR_DEFECTO: Config = {
@@ -99,6 +161,18 @@ export const CONFIG_POR_DEFECTO: Config = {
   ],
   diaConCeroAdelante: false,
   nombreArchivoRegistro: ".bancosflow.json",
+
+  modoAcceso: "sistemaArchivos",
+  ubicacionRegistro: "local",
+
+  remotoRclone: "sharepoint:",
+  rutaRemotaBase: "contable/privado/ADMINISTRACION/PlanillaBancos",
+  rutaTrabajoLocal: "/home/teledata/bancosflow-trabajo",
+  rutaRemotaPlanillaMaestra: "contable/privado/ADMINISTRACION/PlanillaBancos/PlanillaBancos.xlsx",
+  rcloneBinario: "rclone",
+  flagsRcloneTransferencia: [],
+  flagsRcloneSubida: ["--ignore-size", "--ignore-checksum"],
+  timeoutRcloneSegundos: 600,
 };
 
 function rutaConfigPorDefecto(): string {
@@ -159,8 +233,16 @@ function validar(config: Config, ruta: string): void {
   if (config.ubicacionPlanilla !== "carpetaDelDia" && config.ubicacionPlanilla !== "maestraFija") {
     problemas.push(`ubicacionPlanilla debe ser "carpetaDelDia" o "maestraFija"`);
   }
-  if (config.ubicacionPlanilla === "maestraFija" && !config.rutaPlanillaMaestra) {
-    problemas.push(`con ubicacionPlanilla="maestraFija" hay que definir rutaPlanillaMaestra`);
+  // Con acceso por sistema de archivos hace falta la ruta local; con rclone, la remota
+  // (que se valida más abajo). Por eso el chequeo depende del modo de acceso.
+  if (
+    config.ubicacionPlanilla === "maestraFija" &&
+    config.modoAcceso === "sistemaArchivos" &&
+    !config.rutaPlanillaMaestra
+  ) {
+    problemas.push(
+      `con ubicacionPlanilla="maestraFija" y modoAcceso="sistemaArchivos" hay que definir rutaPlanillaMaestra`
+    );
   }
 
   if (!(config.retencionBackupsDias > 0)) problemas.push("retencionBackupsDias debe ser mayor a 0");
@@ -174,6 +256,22 @@ function validar(config: Config, ruta: string): void {
     problemas.push(`nombresMeses debe tener exactamente 12 elementos (recibido: ${config.nombresMeses.length})`);
   }
   if (!config.nombreArchivoRegistro) problemas.push("nombreArchivoRegistro no puede estar vacío");
+
+  if (config.modoAcceso !== "sistemaArchivos" && config.modoAcceso !== "rclone") {
+    problemas.push(`modoAcceso debe ser "sistemaArchivos" o "rclone"`);
+  }
+  if (config.ubicacionRegistro !== "local" && config.ubicacionRegistro !== "carpetaDelDia") {
+    problemas.push(`ubicacionRegistro debe ser "local" o "carpetaDelDia"`);
+  }
+  if (config.modoAcceso === "rclone") {
+    if (!config.remotoRclone) problemas.push("con modoAcceso=rclone hay que definir remotoRclone");
+    if (!config.rutaRemotaBase) problemas.push("con modoAcceso=rclone hay que definir rutaRemotaBase");
+    if (!config.rutaTrabajoLocal) problemas.push("con modoAcceso=rclone hay que definir rutaTrabajoLocal");
+    if (config.ubicacionPlanilla === "maestraFija" && !config.rutaRemotaPlanillaMaestra) {
+      problemas.push("con modoAcceso=rclone y maestraFija hay que definir rutaRemotaPlanillaMaestra");
+    }
+    if (!(config.timeoutRcloneSegundos > 0)) problemas.push("timeoutRcloneSegundos debe ser mayor a 0");
+  }
 
   // Validar la zona horaria contra el propio motor de Intl, en vez de una lista fija.
   try {
