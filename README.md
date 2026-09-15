@@ -369,6 +369,22 @@ Se verificó que un archivo binario de 1 MB sube sin problema y que el mismo `.x
 
 **La solución:** `modoAcceso: "rclone"`. No se monta nada. Se baja con `rclone copy`, se procesa en disco local, y se sube con `rclone copy --ignore-size --ignore-checksum`, verificando después que el archivo esté en el destino. Si algo falla, **falla nuestro proceso**: sale por el log del servicio y el registro no se escribe, así que el próximo ciclo reintenta.
 
+### Verificación del entorno
+
+```bash
+bash scripts/verificar-entorno.sh
+```
+
+Comprueba de una sola pasada: que estén `node` y `rclone`, que `dist/` esté compilado y al
+día, que la configuración cargue, que el remoto responda (token vigente), que se vea la
+carpeta base, que exista la planilla maestra, que **se pueda escribir** en el remoto, el
+estado de los servicios y si quedaron restos de montajes viejos. Sólo lee; la única
+escritura es un archivo de prueba que borra enseguida.
+
+Existe porque diagnosticar esto a mano llevó horas más de una vez: un token vencido, un
+remoto mal escrito o la falta de permiso de escritura dan errores muy distintos y ninguno
+evidente.
+
 ### Configuración para SharePoint
 
 ```json
@@ -384,7 +400,12 @@ Se verificó que un archivo binario de 1 MB sube sin problema y que el mismo `.x
 }
 ```
 
-`flagsRcloneSubida` vale `["--ignore-size", "--ignore-checksum"]` por defecto y **no conviene cambiarlo**: sin esos flags, rclone borra la planilla del destino al considerarla corrupta.
+`flagsRcloneSubida` vale `["--ignore-size", "--ignore-checksum", "--ignore-times"]` por defecto y **no conviene cambiarlo**:
+
+- Sin `--ignore-size` / `--ignore-checksum`, rclone considera la transferencia corrupta y **borra la planilla del destino**.
+- Sin `--ignore-times`, al quedar la fecha como único criterio de comparación, rclone saltea la subida cuando coincide con la del remoto — sin dar error. El proceso sólo sube cuando hubo cambios reales, así que forzar la subida es lo correcto.
+
+Toda la salida de rclone queda registrada en `rutaLogRclone` (`bancosflow-trabajo/rclone.log` por defecto), salgan bien o mal los comandos. Antes el `stderr` sólo se miraba al fallar y en el caso exitoso se descartaba, así que no había forma de reconstruir después cuántos intentos hicieron falta.
 
 Verificación rápida antes de procesar:
 
@@ -407,6 +428,19 @@ Con `ubicacionRegistro: "local"` (por defecto), el `.bancosflow.json` se guarda 
 ### Orden de las operaciones
 
 La planilla **se publica antes de anotar el registro**. Si la subida falla, el registro no se escribe y el próximo ciclo reintenta. Al revés quedaría anotado como hecho algo que nunca llegó al destino.
+
+### Respaldos y el bucle de reintento
+
+Cuando la publicación falla, el poller reintenta cada ~60 s de forma indefinida. Eso es deseable —así se recupera solo cuando el remoto vuelve— pero tenía dos efectos colaterales que se corrigieron:
+
+- **Un respaldo por ciclo.** Con la planilla en ~1,2 MB eran unos 2 GB por día en un disco de 30 GB. Ahora, antes de copiar, se comprueba si el último respaldo ya es idéntico (mismo tamaño y no anterior a la última modificación del origen) y en ese caso se saltea. Verificado: 6 ciclos fallidos seguidos generan **1** solo respaldo.
+- **La purga no corría.** Vivía después de la publicación, así que un remoto caído dejaba de purgar justo cuando más respaldos se generaban. Ahora está en un `finally` y corre siempre.
+
+### Aviso de estados de cuenta incompletos
+
+Además del hueco *al principio* del rango, se avisa cuando el estado de cuenta **no llega hasta hoy**: `llega sólo hasta el 11/09; falta(n) 3 día(s) hasta hoy`. Puede ser normal (fin de semana o feriado) o indicar una descarga incompleta. Es un aviso, no un error.
+
+Surgió de un caso real: un 14/09, el estado de Santander Pesos traía movimientos sólo hasta el 11/09 y nadie se enteró.
 
 ## Instalación en la VM
 

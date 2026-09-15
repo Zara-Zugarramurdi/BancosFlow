@@ -133,6 +133,16 @@ export interface Config {
 
   /** Tiempo máximo para un comando de rclone, en segundos. */
   timeoutRcloneSegundos: number;
+
+  /**
+   * Archivo donde se registra la salida de TODOS los comandos de rclone, salgan bien o mal.
+   *
+   * Hasta ahora el `stderr` de rclone sólo se miraba cuando el comando fallaba; en el caso
+   * exitoso se descartaba por completo, así que no quedaba constancia de cuántos intentos
+   * hicieron falta ni de cuánto tardó. Eso dejó el diagnóstico a ciegas más de una vez.
+   * Vacío desactiva el registro.
+   */
+  rutaLogRclone: string;
 }
 
 export const CONFIG_POR_DEFECTO: Config = {
@@ -171,8 +181,9 @@ export const CONFIG_POR_DEFECTO: Config = {
   rutaRemotaPlanillaMaestra: "contable/privado/ADMINISTRACION/PlanillaBancos/PlanillaBancos.xlsx",
   rcloneBinario: "rclone",
   flagsRcloneTransferencia: [],
-  flagsRcloneSubida: ["--ignore-size", "--ignore-checksum"],
+  flagsRcloneSubida: ["--ignore-size", "--ignore-checksum", "--ignore-times"],
   timeoutRcloneSegundos: 600,
+  rutaLogRclone: "/home/teledata/bancosflow-trabajo/rclone.log",
 };
 
 function rutaConfigPorDefecto(): string {

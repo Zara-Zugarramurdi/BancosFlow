@@ -46,6 +46,16 @@ export interface ResultadoActualizacionDesdeUltimaFecha extends ResultadoActuali
   fechaDesde: Date;
   /** Fechas que el estado de cuenta no cubre entre la planilla y su primer movimiento. */
   diasSinCobertura: Date[];
+  /** Última fecha con movimientos dentro del estado de cuenta. */
+  ultimaFechaDelEstado?: Date;
+  /**
+   * Días entre el final del estado de cuenta y hoy.
+   *
+   * Detecta el caso de un estado de cuenta descargado incompleto: ocurrió con Santander
+   * Pesos, que un 14/09 traía movimientos sólo hasta el 11/09 y nadie se enteró. El aviso
+   * de `diasSinCobertura` mira el hueco al PRINCIPIO del rango, no al final.
+   */
+  diasFaltantesAlFinal: Date[];
   /** Cantidad de movimientos agregados, desglosada por día. */
   agregadosPorDia: Array<{ fecha: string; cantidad: number }>;
 }
@@ -209,6 +219,23 @@ export async function actualizarDesdeUltimaFecha(
     }
   }
 
+  // 4b. Detectar si el estado de cuenta se queda corto respecto de hoy.
+  //     Puede ser normal (fin de semana, feriado, o que el banco aún no publique el día),
+  //     así que es un aviso y no un error: quien lo lee decide si falta descargar algo.
+  const diasFaltantesAlFinal: Date[] = [];
+  let ultimaFechaDelEstado: Date | undefined;
+  if (movimientos.length > 0) {
+    ultimaFechaDelEstado = soloDiaUTC(movimientos[movimientos.length - 1].fecha);
+    const hoy = soloDiaUTC(new Date());
+    for (
+      let dia = sumarDias(ultimaFechaDelEstado, 1);
+      dia.getTime() <= hoy.getTime();
+      dia = sumarDias(dia, 1)
+    ) {
+      diasFaltantesAlFinal.push(dia);
+    }
+  }
+
   // 5. Delegar la inserción al núcleo compartido.
   const resultado = await aplicarMovimientosAPlanilla(rutaPlanilla, cuenta, movimientos, rutaSalida);
 
@@ -225,6 +252,8 @@ export async function actualizarDesdeUltimaFecha(
     ultimaFechaEnPlanilla,
     fechaDesde,
     diasSinCobertura,
+    ultimaFechaDelEstado,
+    diasFaltantesAlFinal,
     agregadosPorDia,
   };
 }
@@ -259,6 +288,16 @@ if (require.main === module) {
             r.diasSinCobertura.map(fechaATextoDDMMYYYY).join(", ")
         );
         console.log("Si hubo movimientos esos días, hay que cargarlos con el estado de cuenta correspondiente.");
+      }
+
+      if (r.diasFaltantesAlFinal.length > 0) {
+        console.log("");
+        console.log(
+          `AVISO: el estado de cuenta llega hasta el ${fechaATextoDDMMYYYY(r.ultimaFechaDelEstado!)}; ` +
+            `falta(n) ${r.diasFaltantesAlFinal.length} día(s) hasta hoy: ` +
+            r.diasFaltantesAlFinal.map(fechaATextoDDMMYYYY).join(", ")
+        );
+        console.log("Puede ser normal (fin de semana o feriado) o indicar una descarga incompleta.");
       }
 
       if (r.agregados.length === 0) {

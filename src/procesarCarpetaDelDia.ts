@@ -179,6 +179,12 @@ export async function procesarCarpetaDelDia(
             `no cubre ${r.diasSinCobertura.length} día(s): ${r.diasSinCobertura.map(fechaATexto).join(", ")}`
           );
         }
+        if (r.diasFaltantesAlFinal.length > 0) {
+          avisos.push(
+            `llega sólo hasta el ${fechaATexto(r.ultimaFechaDelEstado!)}; ` +
+              `falta(n) ${r.diasFaltantesAlFinal.length} día(s) hasta hoy`
+          );
+        }
         resultados.push({
           archivo: estado.nombre,
           cuenta: estado.cuenta.etiqueta,
@@ -195,6 +201,12 @@ export async function procesarCarpetaDelDia(
       if (r.diasSinCobertura.length > 0) {
         avisos.push(
           `no cubre ${r.diasSinCobertura.length} día(s): ${r.diasSinCobertura.map(fechaATexto).join(", ")}`
+        );
+      }
+      if (r.diasFaltantesAlFinal.length > 0) {
+        avisos.push(
+          `llega sólo hasta el ${fechaATexto(r.ultimaFechaDelEstado!)}; ` +
+            `falta(n) ${r.diasFaltantesAlFinal.length} día(s) hasta hoy`
         );
       }
       const filas = r.agregados.length > 0 ? `${r.filaInicial}-${r.filaFinal}` : undefined;
@@ -232,6 +244,10 @@ export async function procesarCarpetaDelDia(
     }
   }
 
+  // A partir de acá puede fallar la publicación. La purga de respaldos va en un `finally`
+  // más abajo para que se ejecute igual: si quedara sólo en el camino feliz, un remoto
+  // caído dejaría de purgar justo cuando más respaldos se están generando.
+  try {
   // Publicar la planilla ANTES de anotar el registro: si la subida falla, el registro no
   // se escribe y el próximo ciclo reintenta. Al revés quedaría anotado como hecho algo que
   // nunca llegó al destino, que es exactamente el modo de falla que se quiere evitar.
@@ -250,7 +266,6 @@ export async function procesarCarpetaDelDia(
   if (!simular) {
     guardarRegistro(espacio.rutaRegistro, registro);
     await publicarRegistro(espacio, { config, simular });
-    purgarRespaldosViejos({ config });
   }
 
   return {
@@ -258,9 +273,12 @@ export async function procesarCarpetaDelDia(
     procesado: true,
     planilla: path.basename(rutaPlanilla),
     resultados,
-    rutaRespaldo: respaldo.rutaRespaldo,
+    rutaRespaldo: respaldo.omitido ? undefined : respaldo.rutaRespaldo,
     publicacion,
   };
+  } finally {
+    if (!simular) purgarRespaldosViejos({ config });
+  }
 }
 
 const EXPLICACION_MOTIVOS: Record<MotivoNoProcesado, string> = {

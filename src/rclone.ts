@@ -30,6 +30,8 @@
  */
 
 import { execFile } from "child_process";
+import * as fsSync from "fs";
+import * as path from "path";
 import { promisify } from "util";
 import { cargarConfig, Config } from "./config";
 
@@ -52,17 +54,45 @@ export function rutaRemota(config: Config, ...partes: string[]): string {
   return `${base}${limpio}`;
 }
 
-async function correrRclone(config: Config, args: string[]): Promise<string> {
+/**
+ * Deja constancia de un comando de rclone en el log propio.
+ *
+ * Se registra SIEMPRE, salga bien o mal. Antes el `stderr` sólo se miraba en el `catch`
+ * y en el caso exitoso se descartaba, así que no había forma de saber después cuántos
+ * intentos hicieron falta ni cuánto tardó una subida. Un fallo en el propio registro
+ * nunca debe frenar el proceso, así que se ignora en silencio.
+ */
+function registrar(config: Config, linea: string): void {
+  if (!config.rutaLogRclone) return;
   try {
-    const { stdout } = await ejecutar(config.rcloneBinario, args, {
+    fsSync.mkdirSync(path.dirname(config.rutaLogRclone), { recursive: true });
+    fsSync.appendFileSync(config.rutaLogRclone, `${new Date().toISOString()} ${linea}\n`, "utf8");
+  } catch {
+    /* el log es best-effort */
+  }
+}
+
+async function correrRclone(config: Config, args: string[]): Promise<string> {
+  // No se registran los argumentos completos de comandos de listado, que son ruido; sí
+  // los de transferencia, que son los que interesa poder reconstruir después.
+  const resumen = args.slice(0, 3).join(" ");
+  const inicio = Date.now();
+  try {
+    const { stdout, stderr } = await ejecutar(config.rcloneBinario, args, {
       maxBuffer: 32 * 1024 * 1024,
       timeout: config.timeoutRcloneSegundos * 1000,
     });
+    const ms = Date.now() - inicio;
+    registrar(config, `OK (${ms} ms) rclone ${resumen}`);
+    const ruido = (stderr ?? "").trim();
+    if (ruido) registrar(config, `   salida: ${ruido.replace(/\n/g, " | ")}`);
     return stdout;
   } catch (err) {
     const e = err as { stderr?: string; message: string };
     // El stderr de rclone dice mucho más que el mensaje de error de Node.
     const detalle = (e.stderr ?? "").trim() || e.message;
+    registrar(config, `FALLO (${Date.now() - inicio} ms) rclone ${resumen}`);
+    registrar(config, `   ${detalle.replace(/\n/g, " | ")}`);
     throw new Error(`rclone ${args[0]} falló:\n${detalle}`);
   }
 }
