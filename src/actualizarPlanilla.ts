@@ -230,45 +230,41 @@ function encontrarAnclaPorContiguidad(hoja: ExcelJS.Worksheet): number {
   return ultimaFilaHoja;
 }
 
+
 /**
- * Devuelve todos los rangos de "fórmula compartida" de Excel en la columna SALDO
- * (cada uno es, literalmente, hasta dónde Excel rellenó una fórmula hacia abajo
- * la última vez que alguien la arrastró).
+ * ¿La fila inmediatamente posterior al ancla tiene fórmula de SALDO?
+ *
+ * Es la señal de que el ledger sigue más abajo y que el corte por continuidad se quedó
+ * corto: si el ledger realmente terminó, esa celda está vacía.
+ *
+ * Reemplaza a un chequeo anterior que comparaba el ancla contra el rango de fórmula
+ * compartida declarado por Excel. Ese chequeo dio dos falsos positivos sobre la planilla
+ * real y ninguna detección verdadera:
+ *
+ *   1. El `ref` que declara Excel puede abarcar más filas de las que existen. Caso real:
+ *      `H7346:H7377` declarado, con fórmulas sólo hasta `H7371` y `H7372`-`H7377` vacías.
+ *   2. Un mismo rango compartido puede cruzar el hueco entre el final del ledger y el
+ *      bloque de proyección. Caso real en `SANTANDER $`: rango `H3641:H3672`, con el
+ *      ledger terminando en 3641 y el bloque "PENDIENTES DE DEBITO" empezando en 3660.
+ *      Ambas cosas son normales, no indican que nadie haya reorganizado nada.
  */
-function obtenerRangosFormulaCompartida(hoja: ExcelJS.Worksheet): Array<{ inicio: number; fin: number }> {
-  const rangos: Array<{ inicio: number; fin: number }> = [];
-  hoja.eachRow((fila) => {
-    const valor = fila.getCell(COL.SALDO).value;
-    if (valor && typeof valor === "object" && "ref" in valor && typeof valor.ref === "string") {
-      const match = valor.ref.match(/^[A-Z]+(\d+):[A-Z]+(\d+)$/);
-      if (match) {
-        rangos.push({ inicio: parseInt(match[1], 10), fin: parseInt(match[2], 10) });
-      }
-    }
-  });
-  return rangos;
+function elLedgerParecContinuar(hoja: ExcelJS.Worksheet, ancla: number): boolean {
+  const valor = hoja.getCell(ancla + 1, COL.SALDO).value;
+  return (
+    valor !== null &&
+    typeof valor === "object" &&
+    ("formula" in valor || "sharedFormula" in valor)
+  );
 }
 
-/**
- * Determina la fila "ancla": la última fila que realmente pertenece al ledger de
- * movimientos. Usamos la continuidad de datos como método principal, y los rangos
- * de fórmula compartida como red de seguridad: si el punto de corte cayera EN
- * MEDIO de un rango de fórmula compartida (no al final de uno), es señal de que
- * algo no es lo que esperamos y preferimos frenar con un error antes que insertar
- * ahí. Que el ancla coincida con el FINAL de un rango (el caso normal) o que no
- * haya ningún rango compartido cerca (hojas más chicas, como BROU EUROS) está bien.
- */
 export function encontrarFilaAncla(hoja: ExcelJS.Worksheet): number {
   const ancla = encontrarAnclaPorContiguidad(hoja);
-  const rangos = obtenerRangosFormulaCompartida(hoja);
-  const rangoQueCruza = rangos.find((r) => r.inicio <= ancla && ancla < r.fin);
-
-  if (rangoQueCruza) {
+  if (elLedgerParecContinuar(hoja, ancla)) {
     throw new Error(
-      `La fila donde terminaría el ledger real de la hoja "${hoja.name}" (${ancla}, calculada por continuidad ` +
-        `de datos) cae en medio de un rango de fórmula compartida de la columna SALDO (${rangoQueCruza.inicio}:` +
-        `${rangoQueCruza.fin}). Es inesperado y podría indicar que alguien reorganizó la hoja a mano; revisar ` +
-        `manualmente antes de correr el script de nuevo.`
+      `La fila donde terminaría el ledger real de la hoja "${hoja.name}" es la ${ancla} (calculada por ` +
+        `continuidad de fechas), pero la fila siguiente (${ancla + 1}) tiene una fórmula de SALDO, así que el ` +
+        `ledger parece seguir más abajo. Revisar la hoja a mano antes de correr el proceso de nuevo, para no ` +
+        `insertar en el medio.`
     );
   }
 
