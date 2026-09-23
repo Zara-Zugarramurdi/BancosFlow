@@ -377,6 +377,19 @@ function desCompartirFormulasDesde(hoja: ExcelJS.Worksheet, filaLimite: number):
     if (rango.fin < filaLimite) continue; // todo el rango queda antes del punto de corte, no hace falta tocarlo
     for (let r = rango.inicio; r <= rango.fin; r++) {
       const celda = hoja.getCell(r, rango.col);
+
+      // Sólo se convierten las celdas que YA tienen fórmula. El `ref` que declara Excel
+      // puede abarcar más filas de las que existen —caso real: `H7346:H7377` con fórmulas
+      // sólo hasta `H7371`— y escribir en las vacías materializaba fórmulas de SALDO por
+      // debajo del final del ledger. Eso ensuciaba la hoja en cada inserción y hacía que
+      // en la corrida siguiente el ledger "pareciera continuar".
+      const actual = celda.value;
+      const tieneFormula =
+        actual !== null &&
+        typeof actual === "object" &&
+        ("formula" in actual || "sharedFormula" in actual);
+      if (!tieneFormula) continue;
+
       const formulaLiteral =
         r === rango.filaMaster ? rango.formula : formulaParaFilaClon(rango.formula, rango.filaMaster, r);
       celda.value = { formula: formulaLiteral } as ExcelJS.CellFormulaValue;
@@ -464,6 +477,119 @@ export async function actualizarPlanilla(
 }
 
 /**
+ * Última fila del ledger cuya FECHA coincide exactamente con la buscada, o `null` si esa
+ * fecha todavía no existe en la hoja.
+ *
+ * Se busca por igualdad exacta y no por "la última fecha menor o igual" a propósito. La
+ * planilla se mantiene a mano desde 2022 y NO está estrictamente ordenada: hay entre 3 y 8
+ * saltos hacia atrás por hoja, varios de ellos fechas mal tipeadas (una de 1928 en
+ * `BROU $`, una de 2002 en `SANTANDER $`, una de 2028 en `SANTANDER U$S`). Con una
+ * comparación de mayor/menor, un movimiento de septiembre podría terminar insertado junto
+ * a la fila de 1928, es decir en medio del ledger de hace años. Con igualdad exacta eso es
+ * imposible: o la fecha está, o no está.
+ */
+function ultimaFilaConFecha(hoja: ExcelJS.Worksheet, fechaClave: string, hastaFila: number): number | null {
+  let encontrada: number | null = null;
+  for (let fila = 2; fila <= hastaFila; fila++) {
+    if (celdaFechaAClave(hoja.getCell(fila, COL.FECHA).value) === fechaClave) {
+      encontrada = fila;
+    }
+  }
+  return encontrada;
+}
+
+/**
+ * Inserta un grupo de movimientos de la MISMA fecha a partir de `filaDestino`, corriendo
+ * hacia abajo lo que hubiera y reajustando las fórmulas afectadas.
+ *
+ * `filaModelo` es la fila de la que se copia el estilo (bordes, fuente): se usa el ancla,
+ * que siempre es una fila real del ledger.
+ */
+function insertarGrupo(
+  workbookPlanilla: ExcelJS.Workbook,
+  hoja: ExcelJS.Worksheet,
+  nombreHoja: string,
+  filaDestino: number,
+  filaModelo: number,
+  grupo: MovimientoLimpio[]
+): void {
+  const cantidad = grupo.length;
+
+  // Convertir a fórmulas literales los rangos compartidos que va a tocar el insert
+  // (ver `desCompartirFormulasDesde` — evita un bug de ExcelJS).
+  desCompartirFormulasDesde(hoja, filaDestino);
+
+  hoja.spliceRows(filaDestino, 0, ...Array.from({ length: cantidad }, () => [] as unknown[]));
+
+  // Reajustar las fórmulas corridas ANTES de escribir las filas nuevas: si fuera al revés,
+  // este barrido "corregiría" también las fórmulas recién creadas, que ya están bien.
+  ajustarFormulasEnTodoElLibro(workbookPlanilla, nombreHoja, filaDestino, cantidad);
+
+  const modeloTieneSaldo = hoja.getCell(filaModelo, COL.SALDO).value != null;
+
+  grupo.forEach((mov, indice) => {
+    const numeroFila = filaDestino + indice;
+    const fila = hoja.getRow(numeroFila);
+
+    // `cell.style = otraCelda.style` en ExcelJS copia una REFERENCIA compartida al mismo
+    // objeto de estilo, no una copia: sin clonarlo, pintar la fila nueva de amarillo
+    // terminaría pintando también la fila modelo. Confirmado con un prototipo.
+    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
+      fila.getCell(col).style = JSON.parse(JSON.stringify(hoja.getCell(filaModelo, col).style));
+    }
+
+    fila.getCell(COL.FECHA).value = mov.fecha;
+    fila.getCell(COL.FECHA).numFmt = "mm-dd-yy";
+    fila.getCell(COL.CONCEPTO).value = mov.textoParaMatchCliente;
+
+    if (mov.tipo === "credito") {
+      fila.getCell(COL.DEBE).value = mov.monto; // DEBE = plata que entra (convención de esta planilla)
+      fila.getCell(COL.DEBE).numFmt = "#,##0.00";
+    } else {
+      fila.getCell(COL.HABER).value = mov.monto; // HABER = plata que sale
+      fila.getCell(COL.HABER).numFmt = "#,##0.00";
+    }
+
+    if (modeloTieneSaldo) {
+      fila.getCell(COL.SALDO).value = {
+        formula: `H${numeroFila - 1}+F${numeroFila}-G${numeroFila}`,
+      } as ExcelJS.CellFormulaValue;
+      fila.getCell(COL.SALDO).numFmt = "#,##0.00";
+    }
+
+    // Amarillo en la fila ENTERA, de FECHA a SALDO.
+    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
+      fila.getCell(col).fill = AMARILLO_RESALTADO;
+    }
+  });
+
+  // Reconectar la cadena de SALDO con la fila que quedó justo debajo del grupo.
+  //
+  // Al insertar en el medio, esa fila conserva su referencia a la fila que tenía ENCIMA
+  // antes del insert, así que se saltea todo lo que acabamos de agregar y el saldo queda
+  // mal de ahí para abajo. Es lo mismo que hace Excel al insertar filas en medio de una
+  // cadena —por eso después hay que "arrastrar" la fórmula a mano—, pero acá no se puede
+  // dejar así: caso real, la fila de abajo seguía calculando desde `H7341` ignorando el
+  // movimiento nuevo de la `7342`.
+  //
+  // Sólo se toca si la fórmula apunta exactamente a la fila anterior al grupo, para no
+  // alterar referencias con otro significado (por ejemplo la del bloque de proyección
+  // "PENDIENTES DE DEBITO", que se deja anclada a propósito).
+  const filaSiguiente = filaDestino + cantidad;
+  const celdaSiguiente = hoja.getCell(filaSiguiente, COL.SALDO);
+  const valorSiguiente = celdaSiguiente.value as { formula?: string } | null;
+  if (valorSiguiente && typeof valorSiguiente === "object" && typeof valorSiguiente.formula === "string") {
+    const filaAnteriorAlGrupo = filaDestino - 1;
+    const ultimaDelGrupo = filaDestino + cantidad - 1;
+    const patron = new RegExp(`(\\$?H\\$?)${filaAnteriorAlGrupo}\\b`, "g");
+    const reconectada = valorSiguiente.formula.replace(patron, `$1${ultimaDelGrupo}`);
+    if (reconectada !== valorSiguiente.formula) {
+      celdaSiguiente.value = { formula: reconectada } as ExcelJS.CellFormulaValue;
+    }
+  }
+}
+
+/**
  * Núcleo compartido: dado un conjunto de movimientos YA parseados y la cuenta a la
  * que corresponden, los inserta en la hoja adecuada de la planilla.
  *
@@ -535,72 +661,39 @@ export async function aplicarMovimientosAPlanilla(
     };
   }
 
-  // 5. Antes de mover nada: convertir a fórmulas literales cualquier rango de
-  //    fórmula compartida que vaya a quedar afectado por la inserción (ver
-  //    comentario de `desCompartirFormulasDesde` — evita un bug de ExcelJS).
-  desCompartirFormulasDesde(hoja, filaInsercion);
-
-  // 6. Insertar `cantidad` filas en blanco justo después del ancla.
-  hoja.spliceRows(filaInsercion, 0, ...Array.from({ length: cantidad }, () => [] as unknown[]));
-
-  // 7. Reajustar TODAS las fórmulas del libro que quedaron corridas por el insert.
-  //    OJO: esto tiene que pasar ANTES de escribir las filas nuevas (paso 8) — si
-  //    fuera al revés, este mismo paso terminaría "reajustando" las fórmulas que
-  //    recién escribimos (que ya están bien, recién creadas) como si también se
-  //    hubieran corrido, rompiéndolas. En este punto las filas nuevas todavía
-  //    están vacías, así que el barrido sólo toca fórmulas que realmente vivían
-  //    más abajo y se corrieron de verdad.
-  ajustarFormulasEnTodoElLibro(workbookPlanilla, nombreHoja, filaInsercion, cantidad);
-
-  // 8. Completar las filas nuevas con los movimientos (con los números de fila
-  //    finales, ya no hace falta ajustarlas después).
-  const saldoAnclaTieneValor = hoja.getCell(filaAncla, COL.SALDO).value != null;
-  let filaActual = filaAncla;
+  // 5. Insertar agrupando por fecha.
+  //
+  //    Cada grupo va debajo del último movimiento que YA tenga esa misma fecha, para que
+  //    los días queden juntos. Si la fecha todavía no existe en la hoja, el grupo va al
+  //    final del ledger, que es el comportamiento anterior.
+  //
+  //    Los grupos se recorren de más viejo a más nuevo (los movimientos ya vienen
+  //    ordenados), así que al insertar el primer movimiento de un día nuevo la fecha pasa
+  //    a existir y el resto de ese día se agrupa debajo.
+  const gruposPorFecha = new Map<string, MovimientoLimpio[]>();
   for (const mov of porAgregar) {
-    filaActual += 1;
-    const fila = hoja.getRow(filaActual);
-    const concepto = mov.textoParaMatchCliente;
+    const clave = fechaSoloDia(mov.fecha);
+    const grupo = gruposPorFecha.get(clave);
+    if (grupo) grupo.push(mov);
+    else gruposPorFecha.set(clave, [mov]);
+  }
 
-    // Copiar el estilo (borde, fuente, alineación) de la fila ancla — así las filas
-    // nuevas se ven igual que el resto del ledger, no en blanco/sin borde. Se copia
-    // ANTES de asignar los numFmt/fill de abajo, que sí queremos que queden como los
-    // definimos explícitamente. OJO: `cell.style = otraCelda.style` en ExcelJS copia
-    // una REFERENCIA compartida al mismo objeto de estilo interno, no una copia
-    // independiente — si no lo clonamos acá, pintar la fila nueva de amarillo más
-    // abajo termina pintando también la fila ancla (y cualquier otra celda que
-    // comparta ese mismo estilo), porque en el fondo es el mismo objeto. Lo
-    // confirmamos con un prototipo antes de aplicar el fix.
-    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
-      const celdaOrigen = hoja.getCell(filaAncla, col);
-      fila.getCell(col).style = JSON.parse(JSON.stringify(celdaOrigen.style));
-    }
+  let anclaActual = filaAncla;
+  let primeraFilaEscrita = Number.POSITIVE_INFINITY;
+  let ultimaFilaEscrita = 0;
 
-    fila.getCell(COL.FECHA).value = mov.fecha;
-    fila.getCell(COL.FECHA).numFmt = "mm-dd-yy";
-    fila.getCell(COL.CONCEPTO).value = concepto;
+  for (const [fechaClave, grupo] of gruposPorFecha) {
+    const ultimaDeEseDia = ultimaFilaConFecha(hoja, fechaClave, anclaActual);
+    const filaDestino = ultimaDeEseDia !== null ? ultimaDeEseDia + 1 : anclaActual + 1;
 
-    if (mov.tipo === "credito") {
-      fila.getCell(COL.DEBE).value = mov.monto; // DEBE = plata que entra (convención de esta planilla)
-      fila.getCell(COL.DEBE).numFmt = "#,##0.00";
-    } else {
-      fila.getCell(COL.HABER).value = mov.monto; // HABER = plata que sale
-      fila.getCell(COL.HABER).numFmt = "#,##0.00";
-    }
+    insertarGrupo(workbookPlanilla, hoja, nombreHoja, filaDestino, anclaActual, grupo);
 
-    if (saldoAnclaTieneValor) {
-      fila.getCell(COL.SALDO).value = {
-        formula: `H${filaActual - 1}+F${filaActual}-G${filaActual}`,
-      } as ExcelJS.CellFormulaValue;
-      fila.getCell(COL.SALDO).numFmt = "#,##0.00";
-    }
+    // El ancla se corre si el grupo entró por encima de ella.
+    if (filaDestino <= anclaActual) anclaActual += grupo.length;
+    else anclaActual = filaDestino + grupo.length - 1;
 
-    // Resaltar en amarillo (el mismo tono que ya usa la planilla a mano) la fila
-    // ENTERA del ledger, de FECHA a SALDO. Antes se pintaba sólo hasta la columna
-    // del monto, dejando sin color las celdas vacías del medio y la de SALDO, lo
-    // que hacía que las filas nuevas se vieran resaltadas "a la mitad".
-    for (let col = COL.FECHA; col <= COL.SALDO; col++) {
-      fila.getCell(col).fill = AMARILLO_RESALTADO;
-    }
+    primeraFilaEscrita = Math.min(primeraFilaEscrita, filaDestino);
+    ultimaFilaEscrita = Math.max(ultimaFilaEscrita, filaDestino + grupo.length - 1);
   }
 
   // 9. Forzar que Excel/LibreOffice recalculen todo al abrir el archivo, en vez de
@@ -616,8 +709,8 @@ export async function aplicarMovimientosAPlanilla(
     agregados: porAgregar,
     omitidosPorDuplicado,
     filaAncla,
-    filaInicial: filaAncla + 1,
-    filaFinal: filaActual,
+    filaInicial: primeraFilaEscrita,
+    filaFinal: ultimaFilaEscrita,
   };
 }
 
