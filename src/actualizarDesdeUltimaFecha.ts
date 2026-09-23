@@ -168,7 +168,7 @@ export async function actualizarDesdeUltimaFecha(
   rutaPlanilla: string,
   rutaEstadoDeCuenta: string,
   rutaSalida: string = rutaPlanilla,
-  opciones: { incluirUltimaFecha?: boolean } = {}
+  opciones: { incluirUltimaFecha?: boolean; soloFecha?: Date } = {}
 ): Promise<ResultadoActualizacionDesdeUltimaFecha> {
   const incluirUltimaFecha = opciones.incluirUltimaFecha ?? true;
 
@@ -192,10 +192,24 @@ export async function actualizarDesdeUltimaFecha(
   }
 
   const { fecha: ultimaFechaEnPlanilla } = detectarUltimaFecha(hoja, nombreHoja);
-  const fechaDesde = incluirUltimaFecha ? ultimaFechaEnPlanilla : sumarDias(ultimaFechaEnPlanilla, 1);
 
-  // 3. Traer del estado de cuenta todo lo que sea de `fechaDesde` en adelante.
-  const incluirFecha = (fecha: Date) => fecha.getTime() >= fechaDesde.getTime();
+  // Modo día puntual: se toma SÓLO esa fecha, ignorando hasta dónde está cargada la hoja.
+  //
+  // Hace falta porque el modo normal mira desde la última fecha cargada hacia adelante, así
+  // que un día que quedó sin cargar no se recupera nunca: si la planilla ya llegó al 22 y
+  // se sube el estado de cuenta del 15, no hay nada "posterior" que procesar. Con la
+  // inserción agrupada por fecha, el día atrasado igual termina en su lugar correcto
+  // dentro de la hoja.
+  const fechaDesde = opciones.soloFecha
+    ? soloDiaUTC(opciones.soloFecha)
+    : incluirUltimaFecha
+      ? ultimaFechaEnPlanilla
+      : sumarDias(ultimaFechaEnPlanilla, 1);
+
+  // 3. Traer del estado de cuenta lo que corresponda.
+  const incluirFecha = opciones.soloFecha
+    ? (fecha: Date) => soloDiaUTC(fecha).getTime() === fechaDesde.getTime()
+    : (fecha: Date) => fecha.getTime() >= fechaDesde.getTime();
   const movimientosSinOrdenar =
     cuenta.banco === "BROU"
       ? parseBrouConFiltro(workbookEstado, incluirFecha)
@@ -206,8 +220,10 @@ export async function actualizarDesdeUltimaFecha(
   // 4. Detectar días que este estado de cuenta no llega a cubrir. No es un error
   //    —si Administración no descargó esos días, no hay nada que hacer— pero
   //    conviene informarlo para que quede a la vista.
+  // En modo día puntual estos avisos no tienen sentido: no se está poniendo la hoja al
+  // día, se está cargando un día concreto que quedó atrasado.
   const diasSinCobertura: Date[] = [];
-  if (movimientos.length > 0) {
+  if (!opciones.soloFecha && movimientos.length > 0) {
     const primeraDelEstado = soloDiaUTC(movimientos[0].fecha);
     const primeraEsperada = sumarDias(ultimaFechaEnPlanilla, 1);
     for (
@@ -224,7 +240,7 @@ export async function actualizarDesdeUltimaFecha(
   //     así que es un aviso y no un error: quien lo lee decide si falta descargar algo.
   const diasFaltantesAlFinal: Date[] = [];
   let ultimaFechaDelEstado: Date | undefined;
-  if (movimientos.length > 0) {
+  if (!opciones.soloFecha && movimientos.length > 0) {
     ultimaFechaDelEstado = soloDiaUTC(movimientos[movimientos.length - 1].fecha);
     const hoy = soloDiaUTC(new Date());
     for (
@@ -261,19 +277,31 @@ export async function actualizarDesdeUltimaFecha(
 // --- Uso directo por consola:
 //   node actualizarDesdeUltimaFecha.js <planilla.xlsx> <estadoDeCuenta.xlsx> [salida.xlsx]
 if (require.main === module) {
-  const [rutaPlanilla, rutaEstado, rutaSalida] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const i = args.indexOf("--fecha");
+  let soloFecha: Date | undefined;
+  if (i !== -1 && args[i + 1]) {
+    const [dd, mm, yyyy] = args[i + 1].split("/").map(Number);
+    soloFecha = new Date(Date.UTC(yyyy, mm - 1, dd));
+    args.splice(i, 2);
+  }
+  const [rutaPlanilla, rutaEstado, rutaSalida] = args;
   if (!rutaPlanilla || !rutaEstado) {
     console.log(
-      "Uso: node actualizarDesdeUltimaFecha.js <planilla.xlsx> <estadoDeCuenta.xlsx> [salida.xlsx]"
+      "Uso: node actualizarDesdeUltimaFecha.js <planilla.xlsx> <estadoDeCuenta.xlsx> [salida.xlsx] [--fecha dd/mm/yyyy]"
     );
     process.exit(1);
   }
 
-  actualizarDesdeUltimaFecha(rutaPlanilla, rutaEstado, rutaSalida)
+  actualizarDesdeUltimaFecha(rutaPlanilla, rutaEstado, rutaSalida, { soloFecha })
     .then((r) => {
       console.log(`Cuenta: ${r.cuenta.etiqueta} -> hoja "${r.hoja}"`);
       console.log(`Última fecha cargada en la planilla: ${fechaATextoDDMMYYYY(r.ultimaFechaEnPlanilla)} (fila ${r.filaAncla})`);
-      console.log(`Se toman movimientos desde: ${fechaATextoDDMMYYYY(r.fechaDesde)} (inclusive)`);
+      console.log(
+        soloFecha
+          ? `Modo día puntual: se toman SÓLO los movimientos del ${fechaATextoDDMMYYYY(r.fechaDesde)}`
+          : `Se toman movimientos desde: ${fechaATextoDDMMYYYY(r.fechaDesde)} (inclusive)`
+      );
       console.log(`Movimientos en ese rango dentro del estado de cuenta: ${r.totalMovimientosEnEstadoDeCuenta}`);
       console.log(`Agregados: ${r.agregados.length}` + (r.agregados.length > 0 ? ` (filas ${r.filaInicial} a ${r.filaFinal})` : ""));
       for (const { fecha, cantidad } of r.agregadosPorDia) {

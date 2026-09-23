@@ -101,7 +101,7 @@ function fechaATexto(d: Date): string {
 }
 
 export async function procesarCarpetaDelDia(
-  opciones: { fecha?: Date; simular?: boolean; config?: Config } = {}
+  opciones: { fecha?: Date; simular?: boolean; config?: Config; soloFecha?: Date } = {}
 ): Promise<ResultadoCarpeta> {
   const config = opciones.config ?? cargarConfig();
   const simular = opciones.simular ?? false;
@@ -148,9 +148,12 @@ export async function procesarCarpetaDelDia(
 
   // Filtrar lo que ya se procesó, comparando por contenido y no sólo por nombre.
   const registro = leerRegistro(espacio.rutaRegistro, rutas.fecha);
+  // En modo día puntual se ignora el registro: se está cargando a propósito un día
+  // atrasado de un archivo que puede figurar como ya procesado. La deduplicación por
+  // fecha+tipo+monto sigue evitando que se dupliquen movimientos.
   const pendientes = clasificacion.estadosDeCuenta
     .map((e) => ({ ...e, hash: hashDeArchivo(e.ruta) }))
-    .filter((e) => !yaProcesado(registro, e.nombre, e.hash));
+    .filter((e) => opciones.soloFecha !== undefined || !yaProcesado(registro, e.nombre, e.hash));
 
   if (pendientes.length === 0) {
     return { ...base, planilla: path.basename(rutaPlanilla), motivo: "todo-procesado" };
@@ -173,7 +176,7 @@ export async function procesarCarpetaDelDia(
         // exactamente qué se agregaría sin tocar la planilla real.
         const copia = path.join(carpetaTemporal(), path.basename(rutaPlanilla));
         fs.copyFileSync(rutaPlanilla, copia);
-        const r = await actualizarDesdeUltimaFecha(copia, estado.ruta, copia);
+        const r = await actualizarDesdeUltimaFecha(copia, estado.ruta, copia, { soloFecha: opciones.soloFecha });
         if (r.diasSinCobertura.length > 0) {
           avisos.push(
             `no cubre ${r.diasSinCobertura.length} día(s): ${r.diasSinCobertura.map(fechaATexto).join(", ")}`
@@ -197,7 +200,7 @@ export async function procesarCarpetaDelDia(
         continue;
       }
 
-      const r = await actualizarDesdeUltimaFecha(rutaPlanilla, estado.ruta, rutaPlanilla);
+      const r = await actualizarDesdeUltimaFecha(rutaPlanilla, estado.ruta, rutaPlanilla, { soloFecha: opciones.soloFecha });
       if (r.diasSinCobertura.length > 0) {
         avisos.push(
           `no cubre ${r.diasSinCobertura.length} día(s): ${r.diasSinCobertura.map(fechaATexto).join(", ")}`
@@ -338,10 +341,20 @@ if (require.main === module) {
   const i = args.indexOf("--fecha");
   const fecha = i !== -1 && args[i + 1] ? new Date(`${args[i + 1]}T12:00:00Z`) : new Date();
 
+  // `--cargar-dia dd/mm/yyyy` procesa SÓLO los movimientos de ese día, ignorando hasta
+  // dónde está cargada la planilla. Es para recuperar un día que quedó sin cargar: el
+  // flujo normal mira hacia adelante y nunca lo levantaría.
+  const j = args.indexOf("--cargar-dia");
+  let soloFecha: Date | undefined;
+  if (j !== -1 && args[j + 1]) {
+    const [dd, mm, yyyy] = args[j + 1].split("/").map(Number);
+    soloFecha = new Date(Date.UTC(yyyy, mm - 1, dd));
+  }
+
   (async () => {
     try {
       if (crearCarpetas) crearCarpetasDelDia(fecha, { simular });
-      imprimirResultado(await procesarCarpetaDelDia({ fecha, simular }));
+      imprimirResultado(await procesarCarpetaDelDia({ fecha, simular, soloFecha }));
     } catch (err) {
       console.error("ERROR:", (err as Error).message);
       process.exit(1);

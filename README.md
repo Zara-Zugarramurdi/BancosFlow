@@ -195,6 +195,24 @@ No en el día siguiente. Si ese día se había cargado a mitad de jornada, o el 
 
 Esto no es teórico: probando con la planilla del 10/08 y su estado de cuenta de BROU Pesos, el proceso encontró **3 movimientos del 07/08 que faltaban** además del único del 10/08. Con el criterio estricto se habrían perdido.
 
+### Cargar un día atrasado
+
+```bash
+node dist/procesarCarpetaDelDia.js --cargar-dia 15/09/2026
+```
+
+Procesa **sólo** los movimientos de ese día, ignorando hasta dónde está cargada la planilla.
+
+Hace falta porque el flujo normal mira desde la última fecha cargada **hacia adelante**: si la hoja ya llegó al 22 y se sube el estado de cuenta del 15, no hay nada "posterior" que procesar y ese día no se recupera nunca. Con este modo, y gracias a la inserción agrupada por fecha, el día atrasado termina en su lugar correcto dentro de la hoja.
+
+En este modo se ignora el registro de procesados: se está cargando a propósito un día de un archivo que puede figurar como ya procesado. La deduplicación por fecha+tipo+monto sigue evitando que se dupliquen movimientos, así que repetir el comando es inofensivo.
+
+También está disponible al llamar el módulo directamente:
+
+```bash
+node dist/actualizarDesdeUltimaFecha.js <planilla> <estado> --fecha 15/09/2026
+```
+
 ### Orden de inserción
 
 Los movimientos se ordenan cronológicamente antes de insertar, de más viejo a más nuevo, manteniendo estable el orden dentro de un mismo día. Hace falta porque **BROU entrega sus estados de cuenta con el movimiento más nuevo primero** (verificado con archivos reales: `10/08 → 07/08 → ... → 06/08`), mientras que Santander los entrega en orden ascendente. Cuando se procesaba un solo día daba igual; al insertar un rango de varios días, respetar el orden del archivo dejaría el ledger al revés.
